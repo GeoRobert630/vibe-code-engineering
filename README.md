@@ -50,6 +50,7 @@ Monitor / Re-audit
 - `tools/security-ci` — SARIF 2.1.0 export and CI gate over the reports above
 - `tools/quality-ci` — Quality CI, Phase 4A accessibility: axe-core in headless Chromium against configured
   local/staging pages, JSON/Markdown/SARIF reports and a quality gate
+- `tools/engineering-ci` — Engineering CI example workflow: orchestrates Security CI + Quality CI into one result
 
 The CI architecture is **Security CI + Quality CI**, two independent pipelines:
 
@@ -77,6 +78,27 @@ is not proof of security; the ZAP baseline is passive only.
 Security findings (`P2-*`, `RT-*`, `AI-*`) and quality findings (`Q-A11Y-*`) are separate namespaces with separate
 reports, SARIF categories and gates. Accessibility findings never become security findings. A clean accessibility
 scan is not proof of complete accessibility or WCAG compliance.
+
+## Engineering CI
+
+`tools/engineering-ci` provides one example workflow that runs both pipelines and produces one combined result.
+It only orchestrates the existing tools; it adds no scanner, finding, severity, gate or SARIF format.
+
+```
+Security CI + Quality CI
+        ↓
+  Engineering CI
+```
+
+- The Security and Quality jobs run independently. Each uploads its own reports (`security-reports/`,
+  `quality-reports/`) and SARIF (separate categories). A final job writes `engineering-summary.json` and fails when
+  either gate fails.
+- Tooling is pinned to reviewed commits: security `bd71c46` (`security-baseline-v1`) and quality `fa816aa`
+  (`quality-ci-v1.1`).
+- Security findings and Quality findings remain separate; the summary repeats neither.
+- A combined PASS does not mean all verification areas are complete. Authentication, Session and Authorization
+  remain NOT VERIFIED unless independently verified; without `RUNTIME_TARGET_URL` Phase 3 does not run.
+- ZAP remains optional and passive.
 
 ## Operating rule
 
