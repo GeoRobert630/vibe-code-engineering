@@ -8,7 +8,9 @@ def rule_ids(findings):
     return {f.rule_id for f in findings}
 
 
-def test_node_fixture(vulnerable_node_report):
+def test_node_fixture(isolated_vulnerable_node_report):
+    # Isolated copy: cfg-env-not-ignored must reflect the fixture's own (absent) ignore rules, not the enclosing repo.
+    vulnerable_node_report = isolated_vulnerable_node_report
     ids = rule_ids(vulnerable_node_report.findings)
     assert {
         "cfg-cors-wildcard-js", "cfg-cookie-insecure-js", "cfg-privileged-container", "cfg-docker-socket",

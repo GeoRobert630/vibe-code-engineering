@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from conftest import FIXTURES, write
+from conftest import FIXTURES, isolated_fixture, write
 
 from phase2 import cli
 
@@ -63,7 +63,9 @@ def test_bad_config_exit_3(tmp_path):
 def test_config_excludes_paths(tmp_path):
     cfg = tmp_path / "c.yaml"
     cfg.write_text("exclude_paths:\n  - 'public/*'\n  - '*.js'\n  - '.env'\n  - 'docker-compose.yml'\n  - 'Dockerfile'\n  - 'package*.json'\n")
-    code = cli.main([str(FIXTURES / "vulnerable-node"), "--config", str(cfg), "--output", str(tmp_path / "o"), "--no-external-tools"])
+    # Isolated copy: the Git scanner must not inspect the enclosing repository's history of this fixture.
+    project = isolated_fixture("vulnerable-node", tmp_path / "isolated")
+    code = cli.main([str(project), "--config", str(cfg), "--output", str(tmp_path / "o"), "--no-external-tools"])
     data = json.loads((tmp_path / "o" / "security-report.json").read_text())
     assert data["findings"] == [] and code == 0
     assert any("Custom exclusions" in lim for lim in data["limitations"])

@@ -32,6 +32,20 @@ def scan_fixture(name: str, **kw):
     return run_scan(ScanOptions(project=FIXTURES / name, use_external_tools=False, **kw))
 
 
+def isolated_fixture(name: str, dest_parent: Path) -> Path:
+    """Copy a fixture outside the enclosing repository so Git-aware checks see only the fixture itself.
+
+    Scanning FIXTURES in place makes the Git scanner and the .gitignore check observe whatever repository the
+    test suite happens to live in (its history, tracked files, ignore rules). The copy has no repository.
+    """
+    dest = dest_parent / name
+    shutil.copytree(FIXTURES / name, dest)
+    if shutil.which("git") is not None:
+        res = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=dest, capture_output=True, text=True, shell=False)
+        assert res.returncode != 0, f"{dest} is inside a Git repository ({res.stdout.strip()}); fixture not isolated"
+    return dest
+
+
 def titles(findings: list[Finding]) -> set[str]:
     return {f.title for f in findings}
 
@@ -61,6 +75,13 @@ requires_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not i
 @pytest.fixture(scope="session")
 def vulnerable_node_report():
     return scan_fixture("vulnerable-node")
+
+
+@pytest.fixture(scope="session")
+def isolated_vulnerable_node_report(tmp_path_factory):
+    """vulnerable-node scanned from a copy outside any Git repository (hermetic .gitignore / Git state)."""
+    project = isolated_fixture("vulnerable-node", tmp_path_factory.mktemp("isolated"))
+    return run_scan(ScanOptions(project=project, use_external_tools=False))
 
 
 @pytest.fixture(scope="session")
