@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phase3-runtime-security"
+version = "0.1.0"
+description = "Read-only runtime security checks (headers, cookies, CORS, HTTPS redirect, TLS, error leakage) for local/staging targets."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+# PyYAML is used only through yaml.safe_load for the target configuration.
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+runtime-security = "runtime_security.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["runtime_security", "runtime_security.auth", "runtime_security.checks", "runtime_security.reporting", "runtime_security.utils", "runtime_security.zap", "runtime_security.authz"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"

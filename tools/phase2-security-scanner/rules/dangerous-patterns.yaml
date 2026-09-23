@@ -1,0 +1,446 @@
+# Dangerous-code rules (see skills/06-security/05-injection/SKILL.md).
+#
+# Fields
+#   id, title, category, cwe, owasp
+#   languages          js (js/jsx/ts/tsx/mjs/cjs/vue/svelte) and/or py
+#   regex              Python regex evaluated per line (comment-only lines are skipped)
+#   severity           severity when no untrusted input is visible nearby (status REQUIRES_REVIEW)
+#   tainted_severity   severity when an untrusted-input source appears on the same line
+#                      (status OPEN, confidence HIGH) or within the previous lines of the
+#                      same function-sized window (status OPEN, confidence MEDIUM)
+#   requires_file      optional regex that must appear somewhere in the file
+#                      (e.g. only treat exec() as child_process when child_process is imported)
+#   requires_taint     only report when untrusted input is visible (reduces noise)
+#   literal_downgrade  if the call argument is only a string literal, downgrade to INFORMATIONAL
+#   sanitizer_downgrade if a known sanitizer appears on the line, downgrade to LOW
+#   impact / recommendation / validation  report text
+#
+# Static matches are never "confirmed" by this scanner. Tainted matches are
+# POTENTIAL findings; everything else is REQUIRES_REVIEW.
+
+rules:
+  # ------------------------------------------------------------ JS / TS
+  - id: js-eval
+    title: Use of eval()
+    category: code-injection
+    languages: [js]
+    regex: '(?<![\w.$])eval\s*\('
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    literal_downgrade: true
+    cwe: CWE-95
+    owasp: A03:2021-Injection
+    impact: Attacker-controlled input reaching eval() executes arbitrary JavaScript (server-side RCE or XSS).
+    recommendation: Remove eval(). Use JSON.parse for data, or an explicit dispatch table for behaviour.
+    validation: Add a test passing a payload such as "process.exit()" or "alert(1)" and assert it is not executed.
+
+  - id: js-new-function
+    title: Dynamic code via new Function()
+    category: code-injection
+    languages: [js]
+    regex: '\bnew\s+Function\s*\('
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    literal_downgrade: true
+    cwe: CWE-95
+    owasp: A03:2021-Injection
+    impact: Strings passed to the Function constructor are compiled and executed as code.
+    recommendation: Replace with static functions or a safe expression evaluator with an allowlist.
+    validation: Test with an injected expression and assert it is rejected.
+
+  - id: js-string-timer
+    title: setTimeout/setInterval with string argument
+    category: code-injection
+    languages: [js]
+    regex: '\bset(?:Timeout|Interval)\s*\(\s*[''"`]'
+    severity: LOW
+    tainted_severity: HIGH
+    cwe: CWE-95
+    owasp: A03:2021-Injection
+    impact: String timers are evaluated like eval().
+    recommendation: Pass a function instead of a string.
+    validation: Confirm the argument is a function reference.
+
+  - id: js-vm-run
+    title: Node vm module executes dynamic code
+    category: code-injection
+    languages: [js]
+    regex: '\bvm\.(?:runInNewContext|runInThisContext|runInContext|compileFunction)\s*\(|\bnew\s+vm\.Script\s*\('
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    cwe: CWE-94
+    owasp: A03:2021-Injection
+    impact: The vm module is not a security sandbox; untrusted code can escape it.
+    recommendation: Do not run untrusted code in-process. Use an isolated process/container with no secrets.
+    validation: Review what code reaches the vm call and whether any of it is user-supplied.
+
+  - id: js-child-process-exec
+    title: Shell command execution (child_process.exec/execSync)
+    category: command-injection
+    languages: [js]
+    regex: '(?:\b(?:child_process|childProcess|cp)\.|(?<![\w.$]))exec(?:Sync)?\s*\('
+    requires_file: 'child_process'
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    literal_downgrade: true
+    cwe: CWE-78
+    owasp: A03:2021-Injection
+    impact: exec() runs the string through a shell; interpolated input allows arbitrary command execution.
+    recommendation: Use execFile/spawn with an argument array and shell:false, and allowlist accepted values.
+    validation: Add a test passing "; id" or "&& whoami" and assert no extra command runs.
+
+  - id: js-child-process-spawn-shell
+    title: child_process spawn/execFile with shell enabled
+    category: command-injection
+    languages: [js]
+    regex: '\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(.*\bshell\s*:\s*true'
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    cwe: CWE-78
+    owasp: A03:2021-Injection
+    impact: shell:true re-enables shell parsing of arguments.
+    recommendation: Remove shell:true and pass arguments as an array.
+    validation: Test with shell metacharacters in arguments.
+
+  - id: js-child-process-spawn
+    title: Process spawn (review arguments)
+    category: command-injection
+    languages: [js]
+    regex: '(?:\b(?:child_process|childProcess|cp)\.|(?<![\w.$]))(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\('
+    requires_file: 'child_process'
+    requires_taint: true
+    severity: LOW
+    tainted_severity: HIGH
+    cwe: CWE-78
+    owasp: A03:2021-Injection
+    impact: User input controlling the program or its arguments can lead to argument injection.
+    recommendation: Hard-code the executable, allowlist argument values and insert "--" before user-supplied values.
+    validation: Test with values starting with "-" and with path separators.
+
+  - id: js-dangerously-set-inner-html
+    title: React dangerouslySetInnerHTML
+    category: xss
+    languages: [js]
+    regex: 'dangerouslySetInnerHTML\s*=\s*\{'
+    severity: MEDIUM
+    tainted_severity: HIGH
+    sanitizer_downgrade: true
+    cwe: CWE-79
+    owasp: A03:2021-Injection
+    impact: Unsanitised HTML rendered this way allows stored/reflected XSS.
+    recommendation: Render text instead, or sanitise with a maintained sanitiser (e.g. DOMPurify) with a strict allowlist.
+    validation: Render a payload like <img src=x onerror=alert(1)> and assert no script executes.
+
+  - id: js-inner-html
+    title: Assignment to innerHTML/outerHTML
+    category: xss
+    languages: [js]
+    regex: '\.(?:inner|outer)HTML\s*(?:\+)?=(?!=)'
+    severity: MEDIUM
+    tainted_severity: HIGH
+    sanitizer_downgrade: true
+    literal_downgrade: true
+    cwe: CWE-79
+    owasp: A03:2021-Injection
+    impact: HTML assigned from untrusted data executes attacker scripts in the user's session.
+    recommendation: Use textContent, or sanitise with DOMPurify before assigning HTML.
+    validation: Inject <img src=x onerror=alert(1)> through the data source and assert it renders inert.
+
+  - id: js-insert-adjacent-html
+    title: insertAdjacentHTML with dynamic content
+    category: xss
+    languages: [js]
+    regex: '\.insertAdjacentHTML\s*\('
+    severity: MEDIUM
+    tainted_severity: HIGH
+    sanitizer_downgrade: true
+    cwe: CWE-79
+    owasp: A03:2021-Injection
+    impact: Same risk as innerHTML.
+    recommendation: Build DOM nodes with textContent or sanitise first.
+    validation: Inject an HTML payload and assert it renders inert.
+
+  - id: js-document-write
+    title: document.write()
+    category: xss
+    languages: [js]
+    regex: '\bdocument\.write(?:ln)?\s*\('
+    severity: MEDIUM
+    tainted_severity: HIGH
+    literal_downgrade: true
+    cwe: CWE-79
+    owasp: A03:2021-Injection
+    impact: Writes raw HTML into the document; untrusted data leads to XSS.
+    recommendation: Replace with DOM APIs (createElement/textContent).
+    validation: Inject an HTML payload and assert it renders inert.
+
+  - id: js-sql-template
+    title: SQL built with template-literal interpolation
+    category: sql-injection
+    languages: [js]
+    regex: '`[^`]*\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|WHERE|ORDER\s+BY)\b[^`]*\$\{[^`]*`'
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    cwe: CWE-89
+    owasp: A03:2021-Injection
+    impact: Interpolated values become part of the SQL text and can change the query (data theft/modification).
+    recommendation: Use parameterised queries ($1 / ? placeholders) or a query builder; never interpolate values into SQL.
+    validation: Add a test sending "' OR '1'='1" and assert the query returns only authorised rows.
+
+  - id: js-sql-concat
+    title: SQL built with string concatenation
+    category: sql-injection
+    languages: [js]
+    regex: '[''"][^''"]*\b(?:SELECT\s.+\sFROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|WHERE)\b[^''"]*[''"]\s*\+\s*[\w.$(\[]'
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    cwe: CWE-89
+    owasp: A03:2021-Injection
+    impact: Concatenated values become part of the SQL text.
+    recommendation: Use parameterised queries.
+    validation: Test with a quote-based payload and assert parameterisation.
+
+  - id: js-raw-query-unsafe
+    title: Unsafe raw-query API
+    category: sql-injection
+    languages: [js]
+    regex: '\$(?:queryRawUnsafe|executeRawUnsafe)\s*\(|\bknex\.raw\s*\(\s*`[^`]*\$\{|\bsequelize\.query\s*\(\s*`[^`]*\$\{'
+    severity: HIGH
+    tainted_severity: CRITICAL
+    cwe: CWE-89
+    owasp: A03:2021-Injection
+    impact: These APIs execute the provided string without parameterisation.
+    recommendation: Use the tagged-template/parameterised variants ($queryRaw`...`, knex.raw(sql, bindings)).
+    validation: Test with a quote-based payload.
+
+  - id: js-dynamic-require
+    title: Dynamic require()/import() with non-literal argument
+    category: code-injection
+    languages: [js]
+    regex: '(?<![\w.$])(?:require|import)\s*\(\s*(?![''"`)\s])[\w.$\[]'
+    requires_taint: true
+    severity: LOW
+    tainted_severity: HIGH
+    cwe: CWE-829
+    owasp: A03:2021-Injection
+    impact: Loading modules chosen by user input can execute arbitrary files.
+    recommendation: Map user input to an allowlist of module names.
+    validation: Test with a path such as ../../etc/passwd or an unexpected module name.
+
+  - id: js-dynamic-file-path
+    title: File-system access with request-controlled path
+    category: path-traversal
+    languages: [js]
+    regex: '\b(?:fs(?:\.promises)?\.(?:readFile|readFileSync|writeFile|writeFileSync|createReadStream|createWriteStream|unlink|unlinkSync|readdir|stat|access|appendFile)|res\.sendFile|res\.download|path\.(?:join|resolve))\s*\('
+    requires_taint: true
+    severity: LOW
+    tainted_severity: HIGH
+    cwe: CWE-22
+    owasp: A01:2021-Broken Access Control
+    impact: '"../" sequences in user input can read or write files outside the intended directory.'
+    recommendation: Resolve the path, then verify it stays inside an allowed base directory; prefer IDs mapped to paths.
+    validation: Request "../../../../etc/passwd" (or ..\\..\\windows\\win.ini) and assert rejection.
+
+  # ------------------------------------------------------------ Python
+  - id: py-eval
+    title: Use of eval()
+    category: code-injection
+    languages: [py]
+    regex: '(?<![\w.])eval\s*\('
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    literal_downgrade: true
+    cwe: CWE-95
+    owasp: A03:2021-Injection
+    impact: eval() of attacker-controlled input executes arbitrary Python (RCE).
+    recommendation: Use ast.literal_eval for literals, json.loads for data, or an explicit dispatch table.
+    validation: Test with "__import__('os').system('id')" and assert it is rejected.
+
+  - id: py-exec
+    title: Use of exec()
+    category: code-injection
+    languages: [py]
+    regex: '(?<![\w.])exec\s*\('
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    literal_downgrade: true
+    cwe: CWE-95
+    owasp: A03:2021-Injection
+    impact: exec() runs arbitrary Python code.
+    recommendation: Remove exec(); restructure to static code paths.
+    validation: Confirm no user-controlled data reaches exec().
+
+  - id: py-os-system
+    title: Shell command via os.system/os.popen
+    category: command-injection
+    languages: [py]
+    regex: '\bos\.(?:system|popen|popen2|popen3|execl|execlp|execv|execvp|spawnl|spawnlp)\s*\('
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    literal_downgrade: true
+    cwe: CWE-78
+    owasp: A03:2021-Injection
+    impact: os.system/os.popen pass the string to a shell; interpolated input allows command injection.
+    recommendation: Use subprocess.run([...], shell=False) with an argument list and allowlisted values.
+    validation: Test with "; id" in the input and assert no extra command runs.
+
+  - id: py-subprocess-shell
+    title: subprocess with shell=True
+    category: command-injection
+    languages: [py]
+    regex: '\bsubprocess\.(?:run|call|check_call|check_output|Popen|getoutput|getstatusoutput)\s*\(.*\bshell\s*=\s*True'
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    cwe: CWE-78
+    owasp: A03:2021-Injection
+    impact: shell=True parses the command through /bin/sh or cmd.exe.
+    recommendation: Pass an argument list with shell=False (the default).
+    validation: Test with shell metacharacters in the input.
+
+  - id: py-subprocess-getoutput
+    title: subprocess.getoutput/getstatusoutput (always uses a shell)
+    category: command-injection
+    languages: [py]
+    regex: '\bsubprocess\.(?:getoutput|getstatusoutput)\s*\('
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    literal_downgrade: true
+    cwe: CWE-78
+    owasp: A03:2021-Injection
+    impact: These helpers always invoke a shell.
+    recommendation: Use subprocess.run with an argument list.
+    validation: Test with shell metacharacters.
+
+  - id: py-subprocess
+    title: subprocess call (review arguments)
+    category: command-injection
+    languages: [py]
+    regex: '\bsubprocess\.(?:run|call|check_call|check_output|Popen)\s*\('
+    severity: INFORMATIONAL
+    tainted_severity: HIGH
+    cwe: CWE-78
+    owasp: A03:2021-Injection
+    impact: User input controlling the executable or its arguments can cause argument injection.
+    recommendation: Keep shell=False, hard-code the executable, allowlist argument values and insert "--" before user values.
+    validation: Test with values beginning with "-".
+
+  - id: py-pickle
+    title: Unsafe deserialisation with pickle
+    category: insecure-deserialization
+    languages: [py]
+    regex: '\b(?:c?[Pp]ickle|_pickle|dill|joblib|shelve)\.(?:loads?|Unpickler|open)\s*\('
+    severity: HIGH
+    tainted_severity: CRITICAL
+    cwe: CWE-502
+    owasp: A08:2021-Software and Data Integrity Failures
+    impact: Unpickling attacker-controlled bytes executes arbitrary code.
+    recommendation: Use JSON or another data-only format; only unpickle data you produced and authenticated (HMAC).
+    validation: Confirm the data source is trusted and integrity-protected.
+
+  - id: py-marshal
+    title: Deserialisation with marshal
+    category: insecure-deserialization
+    languages: [py]
+    regex: '\bmarshal\.loads?\s*\('
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    cwe: CWE-502
+    owasp: A08:2021-Software and Data Integrity Failures
+    impact: marshal is not safe against malicious input.
+    recommendation: Use JSON.
+    validation: Confirm the data source is trusted.
+
+  - id: py-yaml-load
+    title: yaml.load without a safe Loader
+    category: insecure-deserialization
+    languages: [py]
+    regex: '\byaml\.(?:load|load_all)\s*\((?![^)]*Loader\s*=\s*(?:yaml\.)?C?SafeLoader)|\byaml\.(?:unsafe_load|unsafe_load_all|full_load)\s*\('
+    severity: HIGH
+    tainted_severity: CRITICAL
+    cwe: CWE-502
+    owasp: A08:2021-Software and Data Integrity Failures
+    impact: Non-safe YAML loaders can construct arbitrary Python objects (code execution).
+    recommendation: Use yaml.safe_load / Loader=yaml.SafeLoader.
+    validation: Parse a document containing !!python/object/apply:os.system and assert it is rejected.
+
+  - id: py-sql-fstring
+    title: SQL built with f-string / format / % interpolation
+    category: sql-injection
+    languages: [py]
+    regex: '(?i)(?:\.execute(?:many)?|\.raw|\.executescript|(?<!\w)text)\s*\(\s*(?:f[''"]|[''"][^''"]*(?:SELECT|INSERT|UPDATE|DELETE|WHERE)[^''"]*[''"]\s*(?:%|\.format\(|\+))'
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    cwe: CWE-89
+    owasp: A03:2021-Injection
+    impact: Interpolated values become part of the SQL text and can alter the query.
+    recommendation: Pass parameters separately, e.g. cursor.execute("... WHERE id = %s", (user_id,)).
+    validation: Test with "' OR '1'='1" and assert only authorised rows are returned.
+
+  - id: py-sql-string-build
+    title: SQL string assembled with interpolation
+    category: sql-injection
+    languages: [py]
+    regex: '(?i)(?:\bf[''"][^''"]*\b(?:SELECT\s.+\sFROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b[^''"]*\{|[''"][^''"]*\b(?:SELECT\s.+\sFROM|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b[^''"]*[''"]\s*(?:%\s*[\w(]|\+\s*\w|\.format\())'
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    cwe: CWE-89
+    owasp: A03:2021-Injection
+    impact: The query string is built from runtime values.
+    recommendation: Use parameterised queries or an ORM query builder.
+    validation: Test with a quote-based payload.
+
+  - id: py-dynamic-import
+    title: Dynamic import from runtime value
+    category: code-injection
+    languages: [py]
+    regex: '\b(?:importlib\.import_module|__import__)\s*\(\s*(?![''"])'
+    requires_taint: true
+    severity: LOW
+    tainted_severity: HIGH
+    cwe: CWE-829
+    owasp: A03:2021-Injection
+    impact: Importing modules chosen by user input can execute arbitrary code.
+    recommendation: Map input to an allowlist of module names.
+    validation: Test with an unexpected module name.
+
+  - id: py-template-string
+    title: Server-side template rendered from a runtime string
+    category: code-injection
+    languages: [py]
+    regex: '\brender_template_string\s*\(|\bjinja2\.Template\s*\(|\bTemplate\s*\(\s*request\.'
+    severity: MEDIUM
+    tainted_severity: CRITICAL
+    literal_downgrade: true
+    cwe: CWE-1336
+    owasp: A03:2021-Injection
+    impact: User-controlled template source enables server-side template injection (often RCE).
+    recommendation: Render fixed template files and pass user data only as context variables.
+    validation: Submit "{{7*7}}" and assert it renders literally.
+
+  - id: py-dynamic-file-path
+    title: File access with request-controlled path
+    category: path-traversal
+    languages: [py]
+    regex: '(?<![\w.])(?:open|send_file|send_from_directory|FileResponse)\s*\(|\bos\.path\.join\s*\(|\bos\.remove\s*\(|\bshutil\.(?:copy|move|rmtree)\s*\('
+    requires_taint: true
+    severity: LOW
+    tainted_severity: HIGH
+    cwe: CWE-22
+    owasp: A01:2021-Broken Access Control
+    impact: '"../" sequences in user input can read or write files outside the intended directory.'
+    recommendation: Resolve the path and verify it stays inside an allowed base directory (Path.resolve().is_relative_to()).
+    validation: Request "../../etc/passwd" and assert rejection.
+
+  - id: py-mark-safe
+    title: HTML marked safe (autoescape bypass)
+    category: xss
+    languages: [py]
+    regex: '\b(?:mark_safe|Markup)\s*\('
+    severity: LOW
+    tainted_severity: HIGH
+    literal_downgrade: true
+    cwe: CWE-79
+    owasp: A03:2021-Injection
+    impact: Bypasses template auto-escaping; untrusted data becomes executable HTML.
+    recommendation: Only mark constant or sanitised HTML as safe.
+    validation: Inject an HTML payload through the data source and assert it renders escaped.

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "security-ci"
+version = "0.1.0"
+description = "SARIF 2.1.0 export and CI gate for the Phase 2 / Phase 3 / AI-review security reports."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []  # standard library only
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+security-ci = "security_ci.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["security_ci"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

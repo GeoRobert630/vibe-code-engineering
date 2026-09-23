@@ -1,0 +1,72 @@
+# Example workflow: copy to .github/workflows/security.yml in the project to scan.
+# No secrets are required or used.
+#
+# Layout: the project is checked out to ./project and the scanner to ./scanner, and only
+# ./project is scanned. Nothing inside the scanned tree is excluded, so a pull request
+# cannot hide files by creating paths that match an exclusion (see SECURITY-REVIEW.md SR-05).
+# Do not pass a --config taken from the pull request itself.
+name: security-scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  phase2-security-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          fetch-depth: 100          # history depth used by the Git secret-history scan
+          persist-credentials: false
+
+      - name: Checkout scanner
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR-ORG/vibe-code-engineering   # replace with the repository hosting the scanner
+          ref: main                                     # better: pin a commit SHA
+          path: scanner
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install scanner
+        run: python -m pip install ./scanner/tools/phase2-security-scanner
+
+      # Optional external tools. Each one adds coverage; the scan still runs without them.
+      - name: Install optional audit tools
+        run: python -m pip install pip-audit
+
+      - name: Run scanner
+        id: scan
+        run: |
+          set +e
+          phase2-scan project --output security-reports --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: security-reports/
+          retention-days: 30
+
+      # Exit codes: 0 clean, 1 non-blocking findings, 2 Critical/High, 3 scanner/tool failure.
+      - name: Fail on Critical/High findings or scanner failure
+        env:
+          SCAN_EXIT: ${{ steps.scan.outputs.exit_code }}
+        run: |
+          echo "Scanner exit code: $SCAN_EXIT"
+          if [ -z "$SCAN_EXIT" ]; then echo "Scanner did not report an exit code"; exit 1; fi
+          if [ "$SCAN_EXIT" -ge 2 ]; then exit 1; fi

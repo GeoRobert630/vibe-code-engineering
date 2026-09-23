@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "tool": {"name": "phase2-security-scanner", "version": "0.1.0"},
+  "summary": {"tool_failure": false},
+  "exit_code": 2,
+  "findings": [
+    {"id": "P2-aaaaaaaaaaa1", "scanner": "dangerous_code", "category": "code-injection", "severity": "CRITICAL", "confidence": "HIGH",
+     "title": "Use of eval()", "description": "eval() detected in JS code.", "file": "server.js", "line": 11, "column": 18,
+     "evidence": "const result = eval(req.query.expr);", "recommendation": "Remove eval().", "cwe": "CWE-95",
+     "status": "OPEN", "rule_id": "js-eval", "blocking": true},
+    {"id": "P2-aaaaaaaaaaa2", "scanner": "secrets", "category": "secret", "severity": "HIGH", "confidence": "MEDIUM",
+     "title": "AWS access key ID", "description": "An AWS access key ID pattern was found.", "file": "config/app.js", "line": 4,
+     "evidence": "Potential AWS access key ID detected (value length 20). Value redacted. leaked=AKIAFAKEFAKEFAKE0000 password=FakeUpstreamPassw0rd",
+     "recommendation": "Rotate.", "cwe": "CWE-798", "status": "OPEN", "rule_id": "aws-access-key-id", "blocking": true},
+    {"id": "P2-aaaaaaaaaaa3", "scanner": "configuration", "category": "cors", "severity": "MEDIUM", "confidence": "HIGH",
+     "title": "CORS wildcard origin", "description": "CORS allows any origin.", "file": "server.js", "line": 8,
+     "evidence": "app.use(cors({ origin: '*' }));", "recommendation": "Allowlist origins.", "cwe": "CWE-942",
+     "status": "BASELINED", "rule_id": "cfg-cors-wildcard-js", "blocking": false},
+    {"id": "P2-aaaaaaaaaaa4", "scanner": "dependencies", "category": "dependency", "severity": "LOW", "confidence": "HIGH",
+     "title": "No Node.js lockfile", "description": "No lockfile.", "file": null, "line": null,
+     "evidence": "", "recommendation": "Commit a lockfile.", "cwe": null, "status": "OPEN", "rule_id": "dep-no-lockfile", "blocking": false},
+    {"id": "P2-aaaaaaaaaaa5", "scanner": "dependencies", "category": "dependency", "severity": "INFORMATIONAL", "confidence": "HIGH",
+     "title": "Install scripts", "description": "Packages with install scripts.", "file": "/abs/path/package-lock.json", "line": 0,
+     "evidence": "", "recommendation": "", "cwe": "not-a-cwe", "status": "REQUIRES_REVIEW", "rule_id": "dep-transitive-install-scripts", "blocking": false},
+    {"id": "not-a-valid-id", "severity": "HIGH", "title": "ignored malformed entry"}
+  ]
+}

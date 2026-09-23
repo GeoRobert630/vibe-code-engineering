@@ -1,0 +1,14 @@
+Using the Automation Framework
+Total of 3 URLs
+PASS: Vulnerable JS Library (Powered by Retire.js) [10003]
+PASS: In Page Banner Information Leak [10009]
+PASS: Strict-Transport-Security Header [10035]
+WARN-NEW: X-Content-Type-Options Header Missing [10021] x 2
+	http://host.docker.internal:3001/ (200 OK)
+WARN-NEW: Cookie No HttpOnly Flag [10010] x 1
+WARN-NEW: Some Unknown Rule [99999] x 1
+FAIL-NEW: Cross-Domain Misconfiguration [10098] x 1
+WARN-NEW: Application Error Disclosure [90022] x 1
+INFO: Storable and Cacheable Content [10049] x 3
+IGNORE: Absence of Anti-CSRF Tokens [10202] x 1
+FAIL-NEW: 1	FAIL-INPROG: 0	WARN-NEW: 4	WARN-INPROG: 0	INFO: 1	IGNORE: 1	PASS: 3

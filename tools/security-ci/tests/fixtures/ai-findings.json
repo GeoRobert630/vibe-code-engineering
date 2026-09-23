@@ -1,0 +1,11 @@
+{
+  "findings": [
+    {"id": "AI-01", "title": "Login accepts any request", "severity": "CRITICAL", "confidence": "HIGH", "category": "authentication",
+     "file": "server.js", "line": 24, "description": "POST /login issues a constant session without checking credentials.",
+     "recommendation": "Verify credentials; random session IDs.", "cwe": "CWE-287", "status": "OPEN"},
+    {"id": "AI-02", "title": "eval on query parameter", "severity": "CRITICAL", "confidence": "HIGH", "category": "injection",
+     "file": "server.js", "line": 11, "duplicate_of": "P2-aaaaaaaaaaa1", "status": "OPEN"},
+    {"id": "AI-03", "title": "Missing rate limiting", "severity": "MEDIUM", "confidence": "LOW", "category": "api-security",
+     "description": "No rate limit on login.", "cross_references": ["RT-COOKIE-001"], "status": "OPEN"}
+  ]
+}

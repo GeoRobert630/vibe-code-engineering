@@ -1,0 +1,40 @@
+# Optional phase2 scanner configuration.
+#
+# The scanner NEVER loads this automatically from the scanned project: pass it
+# explicitly with --config. Keep it in a protected location (e.g. CODEOWNERS),
+# because exclusions and disabled scanners reduce coverage. Every exclusion is
+# listed under "Limitations" in the report.
+#
+# Unknown keys are rejected (exit code 3).
+
+# Extra directory names to skip anywhere in the tree (added to the defaults:
+# .git node_modules .venv venv vendor coverage target .terraform ...).
+exclude_dirs:
+  - generated
+
+# Glob patterns (POSIX-style, relative to the project root) to skip.
+# This example is for scanning THIS repository: it excludes the scanner's own
+# deliberately vulnerable fixtures. Do not reuse these paths for other projects -
+# exclusions are attacker-controllable path names.
+
+exclude_paths:
+  - "tools/phase2-security-scanner/tests/fixtures/*"
+  - "tools/phase2-security-scanner/reports/*"
+
+# Set to false to also walk node_modules/.venv/etc. (slow; rarely useful).
+include_default_excludes: true
+
+# Include dist/ build/ .next/ out/ for secret scanning of client bundles.
+include_build_output: false
+
+# Files larger than this (bytes) are skipped and listed in Limitations.
+max_file_size: 2097152
+
+# Recent commits scanned for secrets (0 disables the history scan).
+git_history_depth: 100
+
+# Per external tool timeout in seconds.
+tool_timeout: 180
+
+# Scanners: secrets, dangerous_code, dependencies, configuration, git
+disabled_scanners: []

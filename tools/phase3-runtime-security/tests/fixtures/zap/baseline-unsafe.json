@@ -1,0 +1,52 @@
+{
+  "@programName": "ZAP",
+  "@version": "2.17.0",
+  "@generated": "Wed, 23 Sep 2026 12:00:00",
+  "site": [
+    {
+      "@name": "http://host.docker.internal:3001",
+      "@host": "host.docker.internal",
+      "@port": "3001",
+      "@ssl": "false",
+      "alerts": [
+        {
+          "pluginid": "10021", "alertRef": "10021", "alert": "X-Content-Type-Options Header Missing", "name": "X-Content-Type-Options Header Missing",
+          "riskcode": "1", "confidence": "2", "riskdesc": "Low (Medium)", "count": "2", "cweid": "693", "wascid": "15", "sourceid": "3",
+          "instances": [{"uri": "http://host.docker.internal:3001/", "method": "GET", "param": "x-content-type-options", "attack": "", "evidence": "", "otherinfo": ""}]
+        },
+        {
+          "pluginid": "10010", "alertRef": "10010", "alert": "Cookie No HttpOnly Flag", "name": "Cookie No HttpOnly Flag",
+          "riskcode": "1", "confidence": "2", "count": "1", "cweid": "1004",
+          "instances": [{"uri": "http://host.docker.internal:3001/?token=FAKEQUERYTOKEN123", "method": "GET", "param": "session",
+                         "attack": "", "evidence": "Set-Cookie: session=abc123FAKESESSIONVALUE", "otherinfo": ""}]
+        },
+        {
+          "pluginid": "10098", "alertRef": "10098", "alert": "Cross-Domain Misconfiguration", "name": "Cross-Domain Misconfiguration",
+          "riskcode": "2", "confidence": "2", "count": "1", "cweid": "264",
+          "instances": [{"uri": "http://host.docker.internal:3001/", "method": "GET", "param": "", "attack": "", "evidence": "Access-Control-Allow-Origin: *", "otherinfo": ""}]
+        },
+        {
+          "pluginid": "90022", "alertRef": "90022", "alert": "Application Error Disclosure", "name": "Application Error Disclosure",
+          "riskcode": "1", "confidence": "2", "count": "1", "cweid": "550",
+          "instances": [{"uri": "http://host.docker.internal:3001/missing", "method": "GET", "param": "", "attack": "",
+                         "evidence": "Traceback (most recent call last): password=FakeLeakedPassw0rd", "otherinfo": "Authorization: Bearer FAKEBEARERTOKENVALUE0123456789"}]
+        },
+        {
+          "pluginid": "99999", "alertRef": "99999", "alert": "Some Unknown Rule", "name": "Some Unknown Rule",
+          "riskcode": "2", "confidence": "1", "count": "1", "cweid": "-1",
+          "instances": [{"uri": "http://host.docker.internal:3001/a", "method": "GET", "param": "", "attack": "", "evidence": "", "otherinfo": ""}]
+        },
+        {
+          "pluginid": "10049", "alertRef": "10049-3", "alert": "Storable and Cacheable Content", "name": "Storable and Cacheable Content",
+          "riskcode": "0", "confidence": "2", "count": "3", "cweid": "524",
+          "instances": [{"uri": "http://host.docker.internal:3001/", "method": "GET", "param": "", "attack": "", "evidence": "", "otherinfo": ""}]
+        },
+        {
+          "pluginid": "10202", "alertRef": "10202", "alert": "Absence of Anti-CSRF Tokens", "name": "Absence of Anti-CSRF Tokens",
+          "riskcode": "3", "confidence": "0", "count": "1", "cweid": "352",
+          "instances": [{"uri": "http://host.docker.internal:3001/", "method": "GET", "param": "", "attack": "", "evidence": "<form>", "otherinfo": ""}]
+        }
+      ]
+    }
+  ]
+}

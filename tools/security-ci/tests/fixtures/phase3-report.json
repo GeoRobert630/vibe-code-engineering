@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "tool": {"name": "phase3-runtime-security", "version": "0.1.0"},
+  "target": {"base_url": "http://127.0.0.1:3510"},
+  "environment": {"name": "local", "production": false},
+  "safety": {"allowed": true, "reason": "local target"},
+  "checks": [{"name": "headers", "enabled": true, "status": "completed", "error": null, "results": []}],
+  "exit_code": 1,
+  "findings": [
+    {"id": "RT-HEADERS-001", "category": "headers", "severity": "LOW", "confidence": "HIGH", "title": "Missing X-Content-Type-Options: nosniff",
+     "endpoint": "GET /", "expected": "X-Content-Type-Options: nosniff", "actual": "header absent", "evidence": "X-Content-Type-Options: (absent) on HTML document",
+     "impact": "i", "recommendation": "Send nosniff.", "validation": "v", "status": "OPEN", "cwe": "CWE-693", "notes": [], "source": "phase3-runtime", "blocking": false},
+    {"id": "RT-COOKIE-001", "category": "cookies", "severity": "MEDIUM", "confidence": "HIGH", "title": "Session cookie without HttpOnly (session)",
+     "endpoint": "GET /", "expected": "HttpOnly", "actual": "HttpOnly absent", "evidence": "Cookie attributes: name=session; value=<redacted 22 chars>; no HttpOnly",
+     "impact": "i", "recommendation": "Set HttpOnly.", "validation": "v", "status": "OPEN", "cwe": "CWE-1004", "notes": [], "source": "phase3-runtime", "blocking": false},
+    {"id": "RT-ZAP-001", "category": "zap", "severity": "MEDIUM", "confidence": "HIGH", "title": "ZAP: CSP: Failure to Define Directive with No Fallback",
+     "endpoint": "GET http://host.docker.internal:3510/?session=FAKESESSIONQUERYVALUE", "expected": "no alert", "actual": "ZAP Medium risk",
+     "evidence": "ZAP alert 10055 (CSP); 1 instance(s); e.g. GET http://host.docker.internal:3510/", "impact": "i", "recommendation": "Review ZAP alert 10055.",
+     "validation": "v", "status": "OPEN", "cwe": "CWE-693", "notes": ["ZAP alert: 10055", "ZAP risk: Medium (confidence High)"], "source": "OWASP ZAP", "blocking": false},
+    {"id": "RT-ZAP-002", "category": "zap", "severity": "LOW", "confidence": "MEDIUM", "title": "ZAP: X-Content-Type-Options Header Missing",
+     "endpoint": "GET http://host.docker.internal:3510/", "expected": "no alert", "actual": "ZAP Low risk",
+     "evidence": "ZAP alert 10021", "impact": "i", "recommendation": "r", "validation": "v", "status": "REQUIRES_REVIEW", "cwe": "CWE-693",
+     "notes": ["ZAP alert: 10021"], "source": "OWASP ZAP", "blocking": false},
+    {"id": "RT-ZAP-003", "category": "zap", "severity": "LOW", "confidence": "MEDIUM", "title": "ZAP: Cookie No HttpOnly Flag",
+     "endpoint": "GET http://host.docker.internal:3510/", "expected": "no alert", "actual": "ZAP Low risk",
+     "evidence": "ZAP alert 10010 (Cookie No HttpOnly Flag); evidence=Set-Cookie: <redacted> Authorization: Bearer FAKEBEARERVALUE1234567890",
+     "impact": "i", "recommendation": "r", "validation": "v", "status": "REQUIRES_REVIEW", "cwe": "CWE-1004",
+     "notes": ["ZAP alert: 10010"], "source": "OWASP ZAP", "blocking": false}
+  ],
+  "correlations": [
+    {"zap_alert_id": "10021", "zap_alert": "X-Content-Type-Options Header Missing", "phase3a_findings": ["RT-HEADERS-001"], "relation": "confirms"},
+    {"zap_alert_id": "10010", "zap_alert": "Cookie No HttpOnly Flag", "phase3a_findings": [], "relation": "related-phase3a-passed"}
+  ],
+  "auth_areas": {"authentication": {"status": "NOT VERIFIED", "reason": "plumbing only"}, "session": {"status": "NOT VERIFIED", "reason": "plumbing only"}},
+  "zap_baseline": {"enabled": true, "executed": true, "exit_code": 2, "summary": {"PASS": 62, "WARN": 5, "FAIL": 0, "INFO": 0}},
+  "limitations": []
+}

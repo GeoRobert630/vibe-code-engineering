@@ -1,0 +1,4 @@
+--extra-index-url https://pypi.internal.example.invalid/simple
+flask
+pyyaml==5.3
+psycopg2-binary==2.9.9

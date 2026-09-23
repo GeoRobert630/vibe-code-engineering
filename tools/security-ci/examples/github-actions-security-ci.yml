@@ -1,0 +1,125 @@
+# Example: full security pipeline in GitHub Actions.
+#
+#   Phase 2 (static)  ->  Phase 3A (runtime, only if a safe target is configured)
+#   -> optional passive ZAP baseline  ->  JSON/Markdown  ->  SARIF upload  ->  CI gate
+#
+# Copy to .github/workflows/security.yml in the project to scan.
+#
+# Configuration uses repository *variables* (Settings > Secrets and variables > Actions > Variables),
+# never secrets, because nothing here needs a credential:
+#   RUNTIME_TARGET_URL      http(s) URL of a local-in-job or STAGING target. Unset = runtime checks skipped.
+#   RUNTIME_ENVIRONMENT     local | development | staging (default staging)
+#   RUNTIME_AUTHORIZED_BY   who approved runtime testing of that staging host (required for non-local hosts)
+#   ENABLE_ZAP_BASELINE     "true" to enable the passive ZAP baseline. The zaproxy/zap-stable image must
+#                           already exist on the runner (self-hosted runner); it is NEVER pulled
+#                           (--pull=never). On GitHub-hosted runners it will be reported "not executed".
+#   SECURITY_GATE_POLICY    release | critical | high | medium | low (default release)
+#
+# Production is never targeted: the generated runtime config always has production: false and the
+# Phase 3 safety gate still refuses production-looking hosts and environments.
+# Authentication/Session remain NOT VERIFIED; SARIF does not change verification status.
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write   # SARIF upload
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUNTIME_TARGET_URL: ${{ vars.RUNTIME_TARGET_URL }}
+      RUNTIME_ENVIRONMENT: ${{ vars.RUNTIME_ENVIRONMENT || 'staging' }}
+      RUNTIME_AUTHORIZED_BY: ${{ vars.RUNTIME_AUTHORIZED_BY }}
+      ENABLE_ZAP_BASELINE: ${{ vars.ENABLE_ZAP_BASELINE || 'false' }}
+      SECURITY_GATE_POLICY: ${{ vars.SECURITY_GATE_POLICY || 'release' }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          fetch-depth: 100
+          persist-credentials: false
+
+      - name: Checkout security tooling
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR-ORG/vibe-code-engineering   # replace; pin a commit SHA in real use
+          path: scanner
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          python -m pip install ./scanner/tools/phase2-security-scanner ./scanner/tools/phase3-runtime-security ./scanner/tools/security-ci
+
+      - name: Phase 2 - static scan
+        id: phase2
+        run: |
+          set +e
+          phase2-scan project --output security-reports/phase2 --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Phase 3 - runtime checks (skipped without a configured target)
+        id: phase3
+        run: |
+          if [ -z "$RUNTIME_TARGET_URL" ]; then
+            echo "::notice title=Phase 3 skipped::No RUNTIME_TARGET_URL configured - Phase 3A runtime checks and ZAP baseline NOT RUN; runtime areas are NOT VERIFIED."
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p security-reports/phase3
+          python - <<'PY'
+          import os, yaml
+          cfg = {
+              "target": {"base_url": os.environ["RUNTIME_TARGET_URL"], "environment": os.environ["RUNTIME_ENVIRONMENT"], "production": False},
+              "zap_baseline": {"enabled": os.environ["ENABLE_ZAP_BASELINE"] == "true"},
+          }
+          if os.environ.get("RUNTIME_AUTHORIZED_BY"):
+              cfg["target"].update({"authorized": True, "authorized_by": os.environ["RUNTIME_AUTHORIZED_BY"]})
+          open("security-reports/phase3/runtime-security.yaml", "w").write(yaml.safe_dump(cfg, sort_keys=False))
+          PY
+          set +e
+          runtime-security --config security-reports/phase3/runtime-security.yaml --output security-reports/phase3 --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          echo "ran=true" >> "$GITHUB_OUTPUT"
+
+      - name: SARIF export
+        run: |
+          ARGS="--phase2 security-reports/phase2/security-report.json"
+          if [ "${{ steps.phase3.outputs.ran }}" = "true" ]; then
+            ARGS="$ARGS --phase3 security-reports/phase3/runtime-security-report.json --runtime-anchor project/.github/workflows/security.yml"
+          fi
+          security-ci sarif $ARGS --sarif security-reports/security.sarif
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: security-reports/
+          retention-days: 30
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: security-reports/security.sarif
+          category: vibe-code-engineering-security
+
+      - name: CI gate
+        run: |
+          ARGS="--phase2 security-reports/phase2/security-report.json"
+          if [ "${{ steps.phase3.outputs.ran }}" = "true" ]; then
+            ARGS="$ARGS --phase3 security-reports/phase3/runtime-security-report.json"
+          fi
+          security-ci gate $ARGS --fail-on "$SECURITY_GATE_POLICY"

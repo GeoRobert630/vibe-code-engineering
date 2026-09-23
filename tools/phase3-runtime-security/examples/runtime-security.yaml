@@ -1,0 +1,44 @@
+# Phase 3 runtime security checks - defensive slice.
+# Read-only checks: security headers, cookie attributes, CORS, HTTP->HTTPS redirect,
+# TLS certificate, error-message leakage. No authentication, no credentials needed.
+#
+# Safety: production targets are refused. Remote (non-local) staging hosts additionally
+# require `authorized: true` and `authorized_by` naming who approved the test.
+
+target:
+  base_url: "http://127.0.0.1:3000"   # local mock or local staging instance
+  environment: "local"                # local | development | test | staging | qa | preview
+  production: false                   # must be set explicitly; true is always refused
+  # http_url: "http://127.0.0.1:3080/" # plain-HTTP listener to check for an HTTPS redirect (same host only)
+  # ca_file: "certs/staging-ca.pem"    # internal CA for an HTTPS staging target
+  # authorized: true                   # required for non-local staging hosts
+  # authorized_by: "Name, ticket/approval reference"
+
+checks:
+  headers: true
+  cookies: true
+  cors: true
+  redirects: true
+  tls: true
+  error_leakage: true
+
+headers:
+  paths: ["/"]                        # relative paths only
+
+cookies:
+  paths: ["/"]                        # pages that set cookies without logging in
+
+cors:
+  paths: ["/"]
+  allowed_origins: ["https://app.example.test"]      # origins the app is supposed to allow
+  # untrusted_origin: "https://phase3-untrusted-origin.invalid"  # only sent as a header, never contacted
+
+error_leakage:
+  json_endpoint: "/"                                  # receives one truncated (invalid) JSON body
+  invalid_resource_path: "/api/items/not-a-valid-id"  # optional
+  missing_parameter_path: "/api/search"               # optional
+
+limits:
+  timeout: 10          # seconds per request (0.5-60)
+  max_requests: 60     # hard cap for the whole run (1-200)
+  delay_seconds: 0.05  # pause between requests
