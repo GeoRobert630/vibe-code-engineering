@@ -48,17 +48,22 @@ Monitor / Re-audit
   3B authentication/session plumbing - currently NOT VERIFIED, 3C authorization/IDOR/BOLA/tenant-isolation
   status only - currently NOT VERIFIED, optional passive ZAP baseline)
 - `tools/security-ci` — SARIF 2.1.0 export and CI gate over the reports above
+- `tools/quality-ci` — Quality CI, Phase 4A accessibility: axe-core in headless Chromium against configured
+  local/staging pages, JSON/Markdown/SARIF reports and a quality gate
+
+The CI architecture is **Security CI + Quality CI**, two independent pipelines:
 
 ```
-CI pipeline
-    ↓
-Phase 2 (static scan)
-    ↓
-Phase 3A (runtime defensive checks - only with a safe local/staging target)
-    ↓
-optional ZAP baseline (passive)
-    ↓
-JSON / Markdown reports
+Security CI                                         Quality CI
+    ↓                                                   ↓
+Phase 2 (static scan)                               Accessibility (Phase 4A, axe-core -
+    ↓                                                 only with a safe local/staging target)
+Phase 3A (runtime defensive checks - only with          ↓
+  a safe local/staging target)                      JSON / Markdown reports
+    ↓                                                   ↓
+optional ZAP baseline (passive)                     SARIF (quality-ci sarif)
+    ↓                                                   ↓
+JSON / Markdown reports                             Quality gate (quality-ci gate)
     ↓
 SARIF (security-ci sarif)
     ↓
@@ -68,6 +73,10 @@ CI gate (security-ci gate)
 Authentication, Session and Authorization (IDOR/BOLA, tenant isolation) remain NOT VERIFIED at runtime; SARIF does
 not change verification status; a clean SARIF report
 is not proof of security; the ZAP baseline is passive only.
+
+Security findings (`P2-*`, `RT-*`, `AI-*`) and quality findings (`Q-A11Y-*`) are separate namespaces with separate
+reports, SARIF categories and gates. Accessibility findings never become security findings. A clean accessibility
+scan is not proof of complete accessibility or WCAG compliance.
 
 ## Operating rule
 

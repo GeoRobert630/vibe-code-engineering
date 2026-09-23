@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<!-- BAD fixture: INTENTIONALLY INACCESSIBLE, exists only for quality-ci tests. Harmless, local, static.
+     Known violations: no document language, no title, image without alt, unlabeled inputs, empty link,
+     empty button, low-contrast text, invalid ARIA role, positive tabindex, skipped heading level. -->
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: sans-serif; background: #ffffff; }
+    .faint { color: #d0d0d0; }
+  </style>
+</head>
+<body>
+  <div>
+    <a href="/bad.html"></a>
+    <a href="/bad.html"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="10" height="10"></a>
+  </div>
+  <main>
+    <h1>Contact us</h1>
+    <h4>Send a message</h4>
+    <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="40" height="40">
+    <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="40" height="40">
+    <p class="faint">We reply within two working days.</p>
+    <p class="faint">Office hours: 9 to 5.</p>
+    <div role="banana">Offer</div>
+    <form action="/bad.html" method="post">
+      <input id="name" name="name" type="text" tabindex="3">
+      <input id="email" name="email" type="email">
+      <button type="submit"></button>
+    </form>
+  </main>
+</body>
+</html>

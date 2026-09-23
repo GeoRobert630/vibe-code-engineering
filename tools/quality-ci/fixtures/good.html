@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!-- GOOD fixture: accessible page. Harmless, local, static; used by quality-ci tests. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contact us - Example Co</title>
+  <style>
+    body { font-family: sans-serif; color: #1a1a1a; background: #ffffff; }
+    a { color: #0645ad; }
+    .note { color: #333333; }
+  </style>
+</head>
+<body>
+  <header>
+    <nav aria-label="Main">
+      <ul>
+        <li><a href="/good.html">Home</a></li>
+        <li><a href="/good.html#contact">Contact</a></li>
+      </ul>
+    </nav>
+  </header>
+  <main>
+    <h1>Contact us</h1>
+    <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Example Co logo" width="40" height="40">
+    <h2 id="contact">Send a message</h2>
+    <p class="note">We reply within two working days.</p>
+    <form action="/good.html" method="post">
+      <label for="name">Name</label>
+      <input id="name" name="name" type="text" autocomplete="name">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="email">
+      <button type="submit">Send message</button>
+    </form>
+  </main>
+  <footer>
+    <p class="note">Example Co</p>
+  </footer>
+</body>
+</html>

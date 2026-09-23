@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quality-ci"
+version = "0.1.0"
+description = "Quality CI Phase 4A: accessibility checks (axe-core in headless Chromium), JSON/Markdown/SARIF reports and a CI gate."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }  # vendored axe-core is MPL-2.0 (src/quality_ci/vendor/axe-core-LICENSE.txt)
+dependencies = ["PyYAML>=6"]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.45"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+quality-ci = "quality_ci.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["quality_ci"]
+
+[tool.setuptools.package-data]
+quality_ci = ["vendor/axe.min.js", "vendor/axe-core-LICENSE.txt", "vendor/README.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"
+markers = ["browser: needs Playwright and a Chromium-family browser (skipped when unavailable)"]

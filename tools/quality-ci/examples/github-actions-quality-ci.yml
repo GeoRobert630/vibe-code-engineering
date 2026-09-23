@@ -1,0 +1,117 @@
+# Example: Quality CI (Phase 4A accessibility) in GitHub Actions. Separate from the security workflow.
+#
+#   Quality CI  ->  Accessibility (axe-core, only if a safe target is configured)
+#   ->  JSON/Markdown  ->  SARIF upload (quality category, not security)  ->  Quality gate
+#
+# Copy to .github/workflows/quality.yml in the project to check.
+#
+# Configuration uses repository *variables* (never secrets; nothing here needs a credential):
+#   QUALITY_TARGET_URL        http(s) URL of a local-in-job or STAGING site. Unset = accessibility NOT CONFIGURED.
+#   QUALITY_ENVIRONMENT       local | development | staging (default staging)
+#   QUALITY_AUTHORIZED_BY     who approved scanning that staging host (required for non-local hosts)
+#   QUALITY_PAGES             space-separated paths to scan, e.g. "/ /contact /pricing" (default "/")
+#   QUALITY_GATE_POLICY       release | critical | high | medium | low (default release)
+#
+# Production is never targeted: the generated config always has production: false and the safety gate
+# refuses production-looking hosts/environments. Only the listed pages are loaded (GET only, no crawling,
+# no clicks, no form submission, no authentication). The runner's preinstalled Google Chrome is used
+# (browser.channel: chrome), so no browser is downloaded.
+# A passing quality gate is not proof of full WCAG compliance. Accessibility findings (Q-A11Y-*) are
+# quality findings and never security findings.
+name: quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write   # SARIF upload (code scanning API; results carry no security-severity)
+
+jobs:
+  accessibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      QUALITY_TARGET_URL: ${{ vars.QUALITY_TARGET_URL }}
+      QUALITY_ENVIRONMENT: ${{ vars.QUALITY_ENVIRONMENT || 'staging' }}
+      QUALITY_AUTHORIZED_BY: ${{ vars.QUALITY_AUTHORIZED_BY }}
+      QUALITY_PAGES: ${{ vars.QUALITY_PAGES || '/' }}
+      QUALITY_GATE_POLICY: ${{ vars.QUALITY_GATE_POLICY || 'release' }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          persist-credentials: false
+
+      - name: Checkout quality tooling
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR-ORG/vibe-code-engineering   # replace; pin a commit SHA in real use
+          path: tooling
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install quality-ci
+        run: python -m pip install "./tooling/tools/quality-ci[browser]"
+
+      - name: Accessibility scan (NOT CONFIGURED without a target)
+        id: a11y
+        run: |
+          mkdir -p quality-reports
+          if [ -z "$QUALITY_TARGET_URL" ]; then
+            echo "::notice title=Accessibility not configured::No QUALITY_TARGET_URL - accessibility NOT VERIFIED."
+            quality-ci a11y --output quality-reports --format both
+            exit 0
+          fi
+          python - <<'PY'
+          import os, yaml
+          cfg = {
+              "target": {"base_url": os.environ["QUALITY_TARGET_URL"], "environment": os.environ["QUALITY_ENVIRONMENT"], "production": False},
+              "pages": os.environ["QUALITY_PAGES"].split(),
+              "browser": {"channel": "chrome"},
+          }
+          if os.environ.get("QUALITY_AUTHORIZED_BY"):
+              cfg["target"].update({"authorized": True, "authorized_by": os.environ["QUALITY_AUTHORIZED_BY"]})
+          open("quality-reports/quality-ci.yaml", "w").write(yaml.safe_dump(cfg, sort_keys=False))
+          PY
+          set +e
+          quality-ci a11y --config quality-reports/quality-ci.yaml --output quality-reports --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: SARIF export
+        id: sarif
+        run: |
+          quality-ci sarif --report quality-reports/accessibility-report.json \
+                           --sarif quality-reports/accessibility.sarif --anchor project/.github/workflows/quality.yml
+          if [ -s quality-reports/accessibility.sarif ]; then
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=SARIF export::quality-reports/accessibility.sarif was not created"
+            exit 1
+          fi
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports
+          path: quality-reports/
+          retention-days: 30
+
+      - name: Upload SARIF to code scanning
+        if: ${{ !cancelled() && steps.sarif.outputs.created == 'true' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: quality-reports/accessibility.sarif
+          category: vibe-code-engineering-quality-accessibility
+
+      - name: Quality gate
+        run: quality-ci gate --report quality-reports/accessibility-report.json --fail-on "$QUALITY_GATE_POLICY"
