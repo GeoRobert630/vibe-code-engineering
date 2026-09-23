@@ -1,0 +1,3 @@
+# Vendored axe-core is verified against a pinned SHA-256 (AXE_SHA256 in tools/quality-ci/src/quality_ci/engine.py).
+# It must be checked out byte-for-byte: no end-of-line conversion (e.g. core.autocrlf=true on Windows).
+tools/quality-ci/src/quality_ci/vendor/axe.min.js -text
