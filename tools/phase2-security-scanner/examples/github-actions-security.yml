@@ -1,3 +1,5 @@
+# Standalone example for a single tool. To adopt the complete system (Security + Accessibility + Performance +
+# final enforcement) use tools/engineering-ci/examples/github-actions-engineering-ci.yml - see docs/ADOPTION.md.
 # Example workflow: copy to .github/workflows/security.yml in the project to scan.
 # No secrets are required or used.
 #
