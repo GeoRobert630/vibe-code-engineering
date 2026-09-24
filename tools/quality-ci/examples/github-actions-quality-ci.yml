@@ -1,3 +1,5 @@
+# Standalone example for a single tool. To adopt the complete system (Security + Accessibility + Performance +
+# final enforcement) use tools/engineering-ci/examples/github-actions-engineering-ci.yml - see docs/ADOPTION.md.
 # Example: Quality CI (Phase 4A accessibility) in GitHub Actions. Separate from the security workflow.
 #
 #   Quality CI  ->  Accessibility (axe-core, only if a safe target is configured)

@@ -1,3 +1,5 @@
+# Standalone example for a single tool. To adopt the complete system (Security + Accessibility + Performance +
+# final enforcement) use tools/engineering-ci/examples/github-actions-engineering-ci.yml - see docs/ADOPTION.md.
 # Example: full security pipeline in GitHub Actions.
 #
 #   Phase 2 (static)  ->  Phase 3A (runtime, only if a safe target is configured)

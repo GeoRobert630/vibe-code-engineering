@@ -1,0 +1,21 @@
+# Optional: accessibility + performance checks of the static site in site/ without a deployed URL.
+# Calls the canonical engineering-ci.yml (unchanged) with quality_site_dir, which serves site/ on 127.0.0.1 inside the
+# quality jobs. Manual trigger only, so it never duplicates the push / pull_request runs of engineering-ci.yml.
+# Delete this file (and site/) if your project sets QUALITY_TARGET_URL to a staging deployment instead.
+name: site-quality
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  site:
+    uses: ./.github/workflows/engineering-ci.yml
+    with:
+      quality_site_dir: site
+      quality_pages: "/"
+      artifact_suffix: -site

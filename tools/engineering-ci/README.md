@@ -33,6 +33,8 @@ producing their reports. Each keeps its own gate policy and finding namespace (`
 
 ## Pinned tooling
 
+The authoritative list of released versions is [docs/ADOPTION.md, section 3](../../docs/ADOPTION.md#3-released-versions).
+
 All three jobs check out the public `GeoRobert630/vibe-code-engineering` at exact reviewed commits, never a branch, so a
 toolkit change cannot alter a project's CI result (or run unreviewed code) until the SHAs are deliberately updated:
 
@@ -43,6 +45,8 @@ toolkit change cannot alter a project's CI result (or run unreviewed code) until
 | performance | `c6b82c0739f0342a3ac6b2952532e86343985e1f` | `quality-ci-v1.2` (hosted-calibrated `MIN_BENCHMARK`) |
 
 ## Configuration
+
+Full reference with defaults, valid values and effect on each gate: [docs/ADOPTION.md, section 4](../../docs/ADOPTION.md#4-configuration-reference).
 
 Only the non-secret repository variables already used by the Security CI and Quality CI examples:
 `RUNTIME_TARGET_URL`, `RUNTIME_ENVIRONMENT`, `RUNTIME_AUTHORIZED_BY`, `ENABLE_ZAP_BASELINE`, `SECURITY_GATE_POLICY`,
