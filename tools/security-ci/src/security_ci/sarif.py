@@ -121,6 +121,12 @@ def build(bundle: Bundle, runtime_anchor: str | None = None) -> dict[str, Any]:
                 run_props["verificationSubareas"] = dict(bundle.verification_subareas)
             if bundle.imported_verification is not None:
                 run_props["importedVerification"] = dict(bundle.imported_verification)
+            if bundle.native_verification is not None:
+                run_props["nativeVerification"] = dict(bundle.native_verification)
+            if bundle.verification_source is not None:
+                run_props["verificationSource"] = dict(bundle.verification_source)
+            if bundle.verification_subarea_source is not None:
+                run_props["verificationSubareaSource"] = dict(bundle.verification_subarea_source)
             run_props["zapBaseline"] = "passive only (zap-baseline.py); not authenticated testing"
         if layer == "phase2" and bundle.phase2_exit_code is not None:
             run_props["sourceExitCode"] = bundle.phase2_exit_code

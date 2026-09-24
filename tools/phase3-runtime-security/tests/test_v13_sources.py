@@ -63,8 +63,6 @@ def test_no_configuration_reports_no_source(tmp_path):
     assert all("source" not in s for s in data["authorization"]["subareas"].values())
 
 
-@pytest.mark.xfail(strict=True, reason="implementation gap: an area absent from a configured import is reported as "
-                                        "source=imported; the v1.3 design (section 2) requires source=none")
 def test_area_absent_from_import_is_source_none(tmp_path):
     """Design section 2: an area with no evidence from either source is `none`, not `imported`."""
     data = _imported_report(tmp_path, ["tenant_isolation"])
@@ -75,8 +73,6 @@ def test_area_absent_from_import_is_source_none(tmp_path):
     assert data["auth_areas"]["authentication"].get("source", "none") == "none"
 
 
-@pytest.mark.xfail(strict=True, reason="v1.3 implementation pending: the serialized authorization block must carry "
-                                        "verification_source and verification_subarea_source (design sections 2 and 19)")
 def test_json_authorization_block_carries_aggregate_source(tmp_path):
     data = _imported_report(tmp_path, ["tenant_isolation"])
     az = data["authorization"]

@@ -116,7 +116,6 @@ def test_incomplete_area_status_never_becomes_pass(tmp_path, status):
 
 # ------------------------------------------------------------------------------------ INCOMPLETE semantics (pending)
 
-@pending
 def test_native_incomplete_fails_gate_by_default(tmp_path):
     b = load_all(None, native_report(tmp_path, native_status="INCOMPLETE"), None)
     assert not evaluate(b, "release").passed
@@ -124,7 +123,6 @@ def test_native_incomplete_fails_gate_by_default(tmp_path):
     assert evaluate(b, "release", allow_incomplete=True).passed
 
 
-@pending
 def test_native_verification_carried_in_sarif(tmp_path):
     doc = build(load_all(None, native_report(tmp_path, native_status="EXECUTED"), None))
     assert doc["runs"][0]["properties"]["nativeVerification"] == {"status": "EXECUTED", "requestsCount": 15}
@@ -169,20 +167,17 @@ def test_not_verified_creates_no_result(tmp_path):
 
 # ------------------------------------------------------------------------------------ reporting shape (pending)
 
-@pending
 def test_native_origin_in_sarif(tmp_path):
     b = load_all(None, native_report(tmp_path, findings=[finding("RT-IDOR-001", "idor")]), None)
     assert results(build(b))["RT-IDOR-001"]["properties"]["origin"] == "native-verification"
 
 
-@pending
 def test_sources_carried_in_sarif(tmp_path):
     props = build(load_all(None, native_report(tmp_path), None))["runs"][0]["properties"]
     assert props["verificationSource"]["authorization"] == "mixed"
     assert props["verificationSubareaSource"] == {"authorization": "native", "idor_bola": "native", "tenant_isolation": "imported"}
 
 
-@pending
 def test_mixed_rejected_as_individual_source(tmp_path):
     p = native_report(tmp_path, subareas={"authorization": area("PASS", source="mixed"), "idor_bola": area("PASS"),
                                           "tenant_isolation": area("PASS")})

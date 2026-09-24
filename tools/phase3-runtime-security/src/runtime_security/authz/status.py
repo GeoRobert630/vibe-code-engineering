@@ -61,6 +61,9 @@ def imported_authz_status(findings: list[Finding], imported: Any) -> dict[str, A
     subs = {key: {"area": label, **area_fields(imported, key, findings)} for key, (label, _, _) in SUBAREAS.items()}
     status = vst.aggregate(s["status"] for s in subs.values())
     reason = REASON_IMPORTED if imported.usable else imported.reason
+    subarea_sources = {key: s.get("source", "none") for key, s in subs.items()}
+    unique_sources = set(subarea_sources.values())
+    aggregate_source = next(iter(unique_sources)) if len(unique_sources) == 1 else "mixed"
     return {
         "area": "Authorization",
         "status": status,
@@ -68,6 +71,8 @@ def imported_authz_status(findings: list[Finding], imported: Any) -> dict[str, A
                            "PASS only when all three are PASS.",
         "scope": list(SCOPE),
         "source": "imported",
+        "verification_source": aggregate_source,
+        "verification_subarea_source": subarea_sources,
         "runtime_checks_executed": any(s["runtime_checks_executed"] for s in subs.values()),
         "credentials_read": False,
         "requests_count": sum(s["requests_count"] for s in subs.values()),

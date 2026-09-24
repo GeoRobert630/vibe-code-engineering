@@ -117,8 +117,6 @@ def test_reader_summary_of_generated_report_is_clean(written):
     assert s["idor_bola"]["status"] == "FAIL" and s["session"]["status"] == "EXECUTED"
 
 
-@pytest.mark.xfail(strict=True, reason="implementation gap: read_phase3_report.py prints finding text without its own "
-                                        "redaction; the v1.3 design (section 18) requires every consumer to redact again")
 def test_reader_redacts_hand_written_reports_independently():
     """Design section 18: every consumer redacts again. The reader currently prints finding text as stored."""
     r = reader()

@@ -38,7 +38,7 @@ def area_fields(imported: ImportedVerification, key: str, findings: list[Finding
     return {
         "status": imported.area_status(key),
         "reason": reason,
-        "source": "imported",
+        "source": "imported" if a is not None else "none",
         "namespace": f"RT-{namespace}-*",
         "runtime_checks_executed": bool(a and a.runtime_checks_executed),
         "credentials_read": False,

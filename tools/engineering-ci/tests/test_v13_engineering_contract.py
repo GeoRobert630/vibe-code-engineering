@@ -51,14 +51,12 @@ def test_existing_verification_field_unchanged(wf, tmp_path):
 
 # ------------------------------------------------------------------------------------ source reporting (pending)
 
-@pending
 def test_summary_has_authoritative_source_fields_defaulting_to_none(wf, tmp_path):
     s, _ = combine(wf, tmp_path, **NV, **job("SECURITY", "PASS", "PASS", 0), **job("QUALITY", "PASS", "PASS", 0), **PERF_PASS)
     assert s["verification_source"] == {"authentication": "none", "session": "none", "authorization": "none"}
     assert s["verification_subarea_source"] == {"authorization": "none", "idor_bola": "none", "tenant_isolation": "none"}
 
 
-@pending
 def test_individual_sources_never_mixed(wf, tmp_path):
     s, _ = combine(wf, tmp_path, **NV, **job("SECURITY", "PASS", "PASS", 0), **job("QUALITY", "PASS", "PASS", 0), **PERF_PASS)
     assert set(s["verification_subarea_source"].values()) <= SOURCE_VALUES
@@ -66,7 +64,6 @@ def test_individual_sources_never_mixed(wf, tmp_path):
     assert s["verification_source"]["authorization"] in SOURCE_VALUES | {"mixed"}
 
 
-@pending
 def test_human_summary_shows_source(wf, tmp_path):
     combine(wf, tmp_path, **NV, **job("SECURITY", "PASS", "PASS", 0), **job("QUALITY", "PASS", "PASS", 0), **PERF_PASS)
     md = (tmp_path / "summary.md").read_text()
