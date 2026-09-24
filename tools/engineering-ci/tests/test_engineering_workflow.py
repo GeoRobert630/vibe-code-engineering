@@ -335,8 +335,8 @@ def test_performance_job_reuses_existing_tool_and_gate(wf, text):
     assert pj["env"]["PERF_GATE_POLICY"] == "${{ vars.PERF_GATE_POLICY || 'release' }}"
     assert pj["env"]["PERF_PROFILE"] == "${{ vars.PERF_PROFILE || 'mobile-lab' }}"
     assert '"channel": "chrome"' in runs and "playwright install" not in text          # no browser download
-    assert '"production": False' in runs and "NOT VERIFIED" in runs
-    assert "needs" not in pj                                                              # independent of security/quality
+    assert '"production": False' in runs and "performance NOT CONFIGURED" in runs
+    assert "needs" not in pj                                                             # independent of security/quality
     for word in ("median", "majority", "benchmark", "budget", "tbt", "lcp"):              # no reimplemented measurement
         assert word not in runs.lower(), word
 

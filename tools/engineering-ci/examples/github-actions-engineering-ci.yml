@@ -432,7 +432,7 @@ jobs:
             TARGET="$QUALITY_TARGET_URL"; ENVIRONMENT="$QUALITY_ENVIRONMENT"; AUTHORIZED_BY="$QUALITY_AUTHORIZED_BY"
           fi
           if [ -z "$TARGET" ]; then
-            echo "::notice title=Performance not configured::No QUALITY_TARGET_URL - performance NOT VERIFIED."
+            echo "::notice title=Performance not configured::No QUALITY_TARGET_URL - performance NOT CONFIGURED."
             quality-ci-perf perf --output performance-reports --format both
             exit 0
           fi

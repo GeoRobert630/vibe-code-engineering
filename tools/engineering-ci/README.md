@@ -112,6 +112,12 @@ contains no findings; findings stay in each tool's own report and SARIF.
 `python -m pytest tools/engineering-ci/tests` checks the workflow's policy (triggers, permissions, pins, no
 credentials, ZAP/browser settings, separate artifacts and SARIF categories, unchanged security/accessibility job
   definitions) and executes the workflow's own
-result-classification and combination scripts against stubbed gate results. The external repository
-`GeoRobert630/vibe-engineering-test` runs the unchanged workflow against four cases (clean, security failure,
-quality failure, both).
+result-classification and combination scripts against stubbed gate results, including the three-gate
+(security x accessibility x performance) result matrix, incomplete performance runs and `enforce: false`.
+
+External validation of the three-gate workflow uses `GeoRobert630/vibe-engineering-test`, which runs an unchanged
+copy of this workflow per case directory and asserts the combined result. The three-gate cases are: all gates PASS;
+security failure; accessibility failure; performance failure (the intentionally slow Quality CI performance fixture);
+and security + accessibility + performance failure. In every case Authentication, Session and Authorization must stay
+NOT VERIFIED. That repository's workflow copy must be updated to this three-gate version before its results apply;
+until then it validates the earlier two-gate (security + accessibility) workflow only.
