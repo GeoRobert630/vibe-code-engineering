@@ -21,6 +21,7 @@ from .models import ID_PREFIX, SEVERITY_ORDER, CheckRun, Confidence, Finding, Ou
 from .utils import safety
 from .utils.http import BudgetExceeded, Client, RequestNotAllowed
 from .utils.redaction import clean
+from .verification import importer as verification_importer
 from .zap import baseline as zap_baseline_mod
 from .zap.detect import ZapStatus
 from .zap.importer import import_alerts
@@ -63,11 +64,14 @@ class RunReport:
     zap_baseline: dict | None = None
     correlations: list = field(default_factory=list)
     zap_failed: bool = False
+    # Imported verification results (None when not configured). Loaded from a local file; no requests.
+    verification: "verification_importer.ImportedVerification | None" = None
     generated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     @property
     def check_failure(self) -> bool:
-        return self.refused or any(r.error for r in self.runs) or self.zap_failed
+        imported_failed = self.verification is not None and not self.verification.usable
+        return self.refused or any(r.error for r in self.runs) or self.zap_failed or imported_failed
 
     @property
     def counts(self) -> dict[str, int]:
@@ -179,4 +183,15 @@ def run_all(cfg: Config, zap_output_dir: Path | None = None) -> RunReport:
     report.findings.sort(key=lambda f: (SEVERITY_ORDER.index(f.severity), f.id))
     report.requests_sent = client.sent
     run_zap_baseline(cfg, report, zap_output_dir)
+    load_verification(cfg, report)
     return report
+
+
+def load_verification(cfg: Config, report: RunReport) -> None:
+    """Attach imported verification results (a local file). Not applied when the safety gate refused the target."""
+    if cfg.verification_results is None or report.refused:
+        return
+    report.verification = verification_importer.load(Path(cfg.verification_results), cfg.base_url)
+    if report.verification.usable:
+        report.findings.extend(report.verification.findings)   # IDs kept exactly as imported
+        report.findings.sort(key=lambda f: (SEVERITY_ORDER.index(f.severity), f.id))

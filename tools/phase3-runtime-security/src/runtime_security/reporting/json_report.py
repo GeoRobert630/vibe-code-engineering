@@ -11,6 +11,7 @@ from ..auth.status import auth_area_status, auth_config_summary, report_zap
 from ..authz.status import authz_area_status
 from ..models import Outcome
 from ..runner import LIMITATIONS, RunReport, is_blocking
+from ..verification.report import import_block
 
 SCHEMA_VERSION = "1.0"
 
@@ -48,14 +49,16 @@ def build(report: RunReport) -> dict[str, Any]:
         "findings": [f.to_dict() | {"blocking": is_blocking(f)} for f in report.findings],
         "limitations": LIMITATIONS,
         # Phase 3B plumbing: Authentication/Session areas (never PASS in this version).
-        "auth_areas": auth_area_status(cfg, report.findings, report.refused, report_zap(report)),
+        "auth_areas": auth_area_status(cfg, report.findings, report.refused, report_zap(report), report.verification),
         "zap": report_zap(report).to_dict(),
         # Passive OWASP ZAP baseline results (no active scan, no credentials).
         "zap_baseline": report.zap_baseline,
         "correlations": report.correlations,
         "authentication_config": auth_config_summary(cfg),
         # Phase 3C coverage status only: no authorization requests, no credentials, no findings generated.
-        "authorization": authz_area_status(report.findings, report.refused),
+        "authorization": authz_area_status(report.findings, report.refused, report.verification),
+        # Imported verification results (separate test suite): NOT CONFIGURED unless configured.
+        "verification_import": import_block(cfg.verification_results is not None, report.verification, report.refused),
     }
 
 

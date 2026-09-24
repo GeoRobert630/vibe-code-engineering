@@ -18,6 +18,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..models import Finding
+from ..verification import status as vst
+from ..verification.report import REASON_IMPORTED, area_fields
 
 CATEGORY = "authorization"
 STATUSES = ("PASS", "FAIL", "NOT CONFIGURED", "NOT VERIFIED", "INCOMPLETE")
@@ -54,7 +56,29 @@ def authz_subareas(findings: list[Finding], refused: bool) -> dict[str, dict[str
     }
 
 
-def authz_area_status(findings: list[Finding], refused: bool) -> dict[str, Any]:
+def imported_authz_status(findings: list[Finding], imported: Any) -> dict[str, Any]:
+    """Authorization block populated from a configured import (statuses per the verification status rules)."""
+    subs = {key: {"area": label, **area_fields(imported, key, findings)} for key, (label, _, _) in SUBAREAS.items()}
+    status = vst.aggregate(s["status"] for s in subs.values())
+    reason = REASON_IMPORTED if imported.usable else imported.reason
+    return {
+        "area": "Authorization",
+        "status": status,
+        "reason": reason + " Overall status combines the Authorization, IDOR/BOLA and Tenant isolation sub-areas; "
+                           "PASS only when all three are PASS.",
+        "scope": list(SCOPE),
+        "source": "imported",
+        "runtime_checks_executed": any(s["runtime_checks_executed"] for s in subs.values()),
+        "credentials_read": False,
+        "requests_count": sum(s["requests_count"] for s in subs.values()),
+        "findings": [f.id for f in findings if f.category == CATEGORY],
+        "subareas": subs,
+    }
+
+
+def authz_area_status(findings: list[Finding], refused: bool, imported: Any = None) -> dict[str, Any]:
+    if imported is not None and not refused:
+        return imported_authz_status(findings, imported)
     ids = [f.id for f in findings if f.category == CATEGORY]
     if ids and not refused:
         status, reason = "FAIL", "RT-AUTHZ findings present in this report (imported results)."

@@ -84,7 +84,7 @@ def _result(f: UnifiedFinding, runtime_anchor: str | None) -> dict[str, Any]:
         props["correlatedZapAlerts"] = f.correlated_zap_alerts
     if f.cross_references:
         props["crossReferences"] = f.cross_references
-    for key, value in f.extra.items():   # RT-AUTHZ safe metadata only (actor labels, resource label, evidence count)
+    for key, value in f.extra.items():   # safe metadata only (RT-AUTHZ actor/resource labels, evidence count, origin)
         props[key] = value
     if f.status in ("BASELINED", "IGNORED"):
         result["suppressions"] = [{"kind": "external", "justification": f"status {f.status} in source report"}]
@@ -117,6 +117,10 @@ def build(bundle: Bundle, runtime_anchor: str | None = None) -> dict[str, Any]:
         run_props: dict[str, Any] = {"exporter": f"{TOOL_NAME} {__version__}", "notice": NOTICE}
         if layer == "phase3":
             run_props["verificationStatus"] = dict(bundle.verification)
+            if bundle.verification_subareas:
+                run_props["verificationSubareas"] = dict(bundle.verification_subareas)
+            if bundle.imported_verification is not None:
+                run_props["importedVerification"] = dict(bundle.imported_verification)
             run_props["zapBaseline"] = "passive only (zap-baseline.py); not authenticated testing"
         if layer == "phase2" and bundle.phase2_exit_code is not None:
             run_props["sourceExitCode"] = bundle.phase2_exit_code

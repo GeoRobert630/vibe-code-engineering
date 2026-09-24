@@ -11,6 +11,7 @@ from ..authz.status import CATEGORIES as AUTHZ_CATEGORIES
 from ..authz.status import authz_area_status
 from ..models import SEVERITY_ORDER, Outcome
 from ..runner import LIMITATIONS, RunReport, is_blocking
+from ..verification.report import import_block
 
 _SPECIAL = re.compile(r"([\\`*_\[\]()!|~#])")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -62,7 +63,7 @@ def render(report: RunReport) -> str:
 
 def _auth_sections(report: RunReport) -> list[str]:
     zap = report_zap(report)
-    areas = auth_area_status(report.cfg, report.findings, report.refused, zap)
+    areas = auth_area_status(report.cfg, report.findings, report.refused, zap, report.verification)
     summary = auth_config_summary(report.cfg)
     L: list[str] = []
     zap_line = f"OWASP ZAP: {'Available' if zap.available else 'Unavailable'}"
@@ -72,6 +73,7 @@ def _auth_sections(report: RunReport) -> list[str]:
     for category, label in AUTH_CATEGORIES.items():
         a = areas[category]
         L += [f"## {label}", "", f"Status: **{a['status']}**", "", esc(a["reason"]), ""]
+        L += _coverage_lines(a)
         if category == "authentication":
             L += [zap_line, ""]
     if summary:
@@ -87,13 +89,37 @@ def _auth_sections(report: RunReport) -> list[str]:
     return L
 
 
+def _yes(value: object) -> str:
+    return "yes" if value is True else "no"
+
+
+def _coverage_lines(a: dict) -> list[str]:
+    """Requests count, findings count and limitations of an area (imported values or the NOT VERIFIED defaults)."""
+    L = [f"Runtime checks executed: {_yes(a.get('runtime_checks_executed'))}. Requests count: {a.get('requests_count', 0)}. "
+         f"Findings: {len(a.get('findings') or [])}. Credentials read: no.", ""]
+    limitations = a.get("limitations") or []
+    L += ["Limitations:", ""] + ([f"- {esc(x)}" for x in limitations] or ["- not executed by this tool; see Reason"]) + [""]
+    return L
+
+
 def _authz_section(report: RunReport) -> list[str]:
-    a = authz_area_status(report.findings, report.refused)
+    a = authz_area_status(report.findings, report.refused, report.verification)
     L = ["## Authorization", "", f"Status: **{a['status']}**", "", "Reason:", "", esc(a["reason"]), "",
-         "Scope: " + esc(", ".join(a["scope"])) + ". Runtime authorization checks executed: no. Credentials read: no.", ""]
-    L += ["| Sub-area | Status | Reserved namespace | Runtime checks executed | Credentials read |", "|---|---|---|---|---|"]
-    L += [f"| {esc(s['area'])} | {s['status']} | `{s['namespace']}` | no | no |" for s in a["subareas"].values()]
-    L += ["", "## Authorization Findings", ""]
+         "Scope: " + esc(", ".join(a["scope"])) + f". Runtime authorization checks executed: {_yes(a['runtime_checks_executed'])}. "
+         "Credentials read: no.", ""]
+    L += ["| Sub-area | Status | Reserved namespace | Runtime checks executed | Credentials read | Requests count | Findings |",
+          "|---|---|---|---|---|---|---|"]
+    L += [f"| {esc(s['area'])} | {s['status']} | `{s['namespace']}` | {_yes(s['runtime_checks_executed'])} | no | "
+          f"{s.get('requests_count', 0)} | {len(s['findings'])} |" for s in a["subareas"].values()]
+    L.append("")
+    for s in a["subareas"].values():
+        L += [f"### {esc(s['area'])} limitations", ""]
+        L += [f"- {esc(x)}" for x in s.get("limitations") or []] or ["- not executed by this tool; see Reason"]
+        L.append("")
+    imp = import_block(report.cfg.verification_results is not None, report.verification, report.refused)
+    L += [f"Imported verification results: **{imp['status']}** - {esc(imp['reason'])}. "
+          f"Requests count: {imp['requests_count']} (budget {imp['request_budget']}).", ""]
+    L += ["## Authorization Findings", ""]
     items = [f for f in report.findings if f.category in AUTHZ_CATEGORIES]
     return L + (_findings(items) if items else ["None.", ""])
 

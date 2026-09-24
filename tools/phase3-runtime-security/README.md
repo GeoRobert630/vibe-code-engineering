@@ -45,11 +45,27 @@ sub-area table) and `## Authorization Findings`. `RT-AUTHZ-*`, `RT-IDOR-*` and `
 results; none are generated. Readers treat a report without `subareas` as all three NOT VERIFIED.
 NOT VERIFIED is a coverage status, not a security verdict.
 
+**Imported verification results** (optional, `verification_results: {path: results.json}`). A separate, authorized
+test suite can supply Authentication, Session, Authorization, IDOR/BOLA and Tenant-isolation results as a JSON file
+([schema 1.0](schemas/verification-results.schema.json)).
+- **What this tool does.** It only reads and validates the file. It sends no request, never receives credentials and
+  reports `credentials_read: false`.
+- **Validation.**
+  - Credential-shaped field names are rejected; values are redacted.
+  - `requests_count` must be 0-20 per area, and 20 at most in total.
+  - Finding IDs must stay within each area's namespace (`RT-AUTH`, `RT-SESSION`, `RT-AUTHZ`, `RT-IDOR`, `RT-TENANT`).
+  - Ambiguous evidence becomes INCOMPLETE; a PASS needs executed checks, evidence and no findings.
+- **In the report.** Valid results fill `auth_areas`, `authorization` and its sub-areas, with statuses, request counts,
+  limitations and findings. A rejected file makes the configured areas INCOMPLETE (exit 3). Without the option,
+  nothing changes: `verification_import` is NOT CONFIGURED and every area stays NOT VERIFIED.
+- **More detail.** See section 17 of the design document.
+
 **Not covered yet:** authentication, authorization, IDOR/BOLA, tenant isolation, CSRF, rate limiting,
 file access, webhooks, business logic. A possible future design for bounded authentication, session, authorization,
 IDOR/BOLA and tenant-isolation verification is in
-[docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md](../../docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md) (design only; not
-implemented - these areas remain NOT VERIFIED).
+[docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md](../../docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md). Runtime probing is not
+implemented; only the import of separately produced results (section 17) is. Without imported results these areas
+remain NOT VERIFIED.
 
 ## Install / run
 

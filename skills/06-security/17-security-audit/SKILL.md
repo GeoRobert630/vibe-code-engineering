@@ -400,6 +400,14 @@ The runtime report has an **Authorization** area (`authorization` in the JSON, "
 - The report's `authorization.subareas` (`authorization`, `idor_bola`, `tenant_isolation`) are always NOT VERIFIED with
   `runtime_checks_executed: false`, `credentials_read: false` and no findings. Older reports without `subareas` are
   read as all three NOT VERIFIED.
+- **Exception: imported results.** The only way these areas get a status other than NOT VERIFIED is when the report
+  was run with `verification_results`.
+  - The results come from a separate, authorized test suite (design doc section 17). The report then shows
+    `verification_import.status: EXECUTED`, sub-areas with `source: imported`, request counts (20 at most) and
+    limitations.
+  - Report those statuses exactly and say they were imported.
+  - A PASS covers only the declared checks, not the whole application.
+  - An INCOMPLETE status (rejected file, ambiguous evidence) is a coverage gap, not a PASS.
 
 NOT VERIFIED for Authorization is independent of the Authentication/Session status and must not be read as an
 authorization verdict. List Authorization (IDOR/BOLA, tenant isolation) under "Not verified" with this reason.

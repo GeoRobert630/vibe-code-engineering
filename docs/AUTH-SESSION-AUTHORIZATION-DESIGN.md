@@ -1,25 +1,38 @@
 # Authentication, Session and Authorization runtime verification - design (v1.2)
 
-**Status: DESIGN ONLY. Nothing in this document is implemented.** In every released version (up to and including
-`v1.1.0`) Authentication, Session, Authorization, IDOR/BOLA and tenant isolation are **NOT VERIFIED** at runtime. This
-document defines how a future version could verify them in a defensive, bounded way. Until an implementation is
-released and validated, all five areas remain NOT VERIFIED.
+**Status:**
+
+- **Released versions (up to and including `v1.1.0`):** Authentication, Session, Authorization, IDOR/BOLA and tenant
+  isolation are all **NOT VERIFIED** at runtime.
+- **Implemented on `v1.2-dev`:**
+  - the status rules;
+  - the imported-results schema;
+  - validation and redaction of imported results;
+  - report, reader and SARIF integration (section 17).
+- **Not implemented:** runtime probing for any of the five areas (sections 2-16 remain design). Without imported
+  results, all five areas remain NOT VERIFIED.
+
+**Evidence limitation.** Imported results prove only the evidence the external test suite supplies. Vibe-Code checks
+that the evidence has the right shape, is safe (no credentials, redacted values, within the request budget) and is
+consistent (a status matches its findings and evidence). It does not independently prove that the external requests
+happened or that the reported responses were observed.
 
 ## 1. Current state
 
-What exists in `tools/phase3-runtime-security` (verified against the code on `v1.2-dev`, baseline `v1.1.0`):
+What exists on `v1.2-dev` (baseline `v1.1.0`):
 
 | Area | What exists | What does not exist |
 |---|---|---|
-| Authentication (3B) | Config schema `authentication:` (`login` POST + content type + field names, `logout`, `protected_endpoint` GET/HEAD) and `credentials:` holding environment-variable **names** only (`auth/…`, `config.py`). Validated, never executed. Report area `auth_areas.authentication`. | Any login, logout or authenticated request. Credential values are never read. |
-| Session (3B) | In-memory `SessionState` / `SessionRegistry` (`auth/models.py`): records presence flags only (`has_cookie`, `cookie_count`, `has_bearer_token`), refuses pickling, one state per actor. Report area `auth_areas.session`. | Any session establishment, continuity, fixation or invalidation check. The model is not used by any check. |
-| Authorization (3C) | `authz/status.py`: report block `authorization` with statuses PASS / FAIL / NOT CONFIGURED / NOT VERIFIED / INCOMPLETE, scope `authorization`, `IDOR/BOLA`, `tenant isolation`, `runtime_checks_executed: false`, `credentials_read: false`. Namespace `RT-AUTHZ-*` reserved for imported results. | Any authorization, IDOR/BOLA or tenant-isolation request. No `RT-AUTHZ-*` finding is generated. |
-| Status logic | `auth_area_status`: NOT VERIFIED, or FAIL only when synthetic/recorded findings of that category exist; never PASS. `authz_area_status`: NOT VERIFIED, FAIL only with imported `RT-AUTHZ-*`. | A PASS path for any of the areas. |
-| Finding IDs | `RT-<PREFIX>-NNN`, numbered per category in check order (`runner.py`); `FINDING_ID_RE` accepts `HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ`. | `IDOR` and `TENANT` prefixes. |
-| Readers / SARIF | `read_phase3_report.py` (skill 17) and `security-ci` read the three areas; security-ci copies them into SARIF run properties (`verificationStatus`) and the gate output; Engineering CI copies them into `engineering-summary.json`. | Sub-area statuses for IDOR/BOLA and tenant isolation. |
-| Safety controls | Safety gate (production refused, environment allow-list, remote hosts need `authorized` + `authorized_by`), `limits.max_requests` (default 60, 1-200), `limits.timeout` (0.5-60 s), `limits.delay_seconds` (0-10), redaction of cookies/tokens/URL credentials, no redirects followed by the probes. | Identity-aware request budgets. |
-| Tests | `tests/test_auth_plumbing.py`, `tests/test_authz_status.py` (status/plumbing only), 163 tests in total. | Any test of an executed auth/session/authz check. |
-| Skills | `skills/06-security/17-security-audit` documents 3B as plumbing only and 3C as status only; `01-authentication`, `02-authorization`, `07-session-cookie-security` cover source review (Layer 2). | Runtime procedures for these areas. |
+| Authentication (3B) | Config schema `authentication:` (`login` POST + content type + field names, `logout`, `protected_endpoint` GET/HEAD) and `credentials:` holding environment-variable **names** only (`auth/...`, `config.py`). Validated, never executed. Report area `auth_areas.authentication`, filled from imported results when configured (section 17). | Any login, logout or authenticated request. Credential values are never read. Runtime authentication probing is NOT implemented. |
+| Session (3B) | In-memory `SessionState` / `SessionRegistry` (`auth/models.py`): records presence flags only (`has_cookie`, `cookie_count`, `has_bearer_token`), refuses pickling, one state per actor. Report area `auth_areas.session`, filled from imported results when configured. | Any session establishment, continuity, fixation or invalidation check. The model is not used by any check. |
+| Authorization (3C) | `authz/status.py`: report block `authorization`. Fields: scope, `runtime_checks_executed`, `credentials_read: false`. Sub-areas `authorization`, `idor_bola` and `tenant_isolation` hold imported results when configured; otherwise all are NOT VERIFIED. | Any authorization, IDOR/BOLA or tenant-isolation request. No finding is generated by this tool. |
+| Status rules | `verification/status.py` (pure). Statuses: NOT CONFIGURED, READY, EXECUTED, PASS, FAIL, INCOMPLETE, NOT VERIFIED. A PASS needs executed checks, evidence and no findings; ambiguous evidence becomes INCOMPLETE; NOT VERIFIED never becomes PASS. Without an import, the existing 3B/3C status logic is unchanged. | A PASS produced by this tool's own checks. |
+| Imported results | Schema 1.0 (`schemas/verification-results.schema.json`); importer (`verification/importer.py`) loads one local JSON file named by `verification_results.path`. Validation is all-or-nothing and covers: target origin match, `requests_count` 0-20 per area and 20 in total, and each area's own namespace. Credential-shaped field names are rejected and values redacted (`verification/redaction.py`). | Any credential input (no environment variable, CLI option or config key). Any check that the external requests actually happened. |
+| Finding IDs | `RT-<PREFIX>-NNN`. The 3A checks number findings per category in check order (`runner.py`). Imported findings keep their IDs, restricted to `RT-AUTH`, `RT-SESSION`, `RT-AUTHZ`, `RT-IDOR`, `RT-TENANT`. `FINDING_ID_RE` accepts all of these. | Any `RT-AUTH/SESSION/AUTHZ/IDOR/TENANT-*` finding generated by this tool. |
+| Readers / SARIF | `read_phase3_report.py` (skill 17) exposes `authentication`, `session`, `authorization`, `authorization_subareas`, `idor_bola`, `tenant_isolation` and `requests_count`. security-ci adds `verificationSubareas` and `importedVerification` to the SARIF run properties and treats an INCOMPLETE import as an incomplete input. Engineering CI copies the three area statuses into `engineering-summary.json`. Old reports still parse. | - |
+| Safety controls | Safety gate (production refused, environment allow-list, remote hosts need `authorized` + `authorized_by`), `limits.max_requests` (default 60, 1-200), `limits.timeout` (0.5-60 s), `limits.delay_seconds` (0-10), redaction of cookies/tokens/URL credentials, no redirects followed by the probes. Imported results are not applied when the gate refuses the target. | Identity-aware request budgets for runtime probing. |
+| Tests | `tests/test_auth_plumbing.py`, `tests/test_authz_status.py`, `tests/test_authz_subareas.py`, `tests/test_verification_status.py`, `tests/test_verification_import.py` (302 Phase 3 tests in total); security-ci `tests/test_imported_verification.py`. All use hand-written JSON; no request is sent for these areas. | Any test of an executed auth/session/authz runtime check. |
+| Skills | `skills/06-security/17-security-audit` documents 3B as plumbing only, 3C as status only, and the imported-results exception. `01-authentication`, `02-authorization` and `07-session-cookie-security` cover source review (Layer 2). | Runtime procedures for these areas. |
 
 ## 2. Verification goals
 
@@ -363,3 +376,140 @@ or INCOMPLETE into a finding or a pass.
   VERIFIED.
 - Remote staging and production remain NOT VERIFIED.
 - A PASS covers only the declared checks; it is not proof that authentication, sessions or authorization are secure.
+
+## 17. Imported Results (implemented in v1.2)
+
+This is the part of the design that is implemented. Vibe-Code does **not** run authentication, session or
+authorization checks. Another test suite, run by someone authorized to test the target, runs them and writes a
+results file. Vibe-Code validates that file and reports what it contains.
+
+- **Who does what.** The external suite sends the requests and holds any test identities. Phase 3
+  (`runtime_security.verification`) reads one local JSON file named in the configuration:
+
+  ```yaml
+  verification_results:
+    path: auth-results.json   # relative to the config file
+  ```
+
+  Loading the file sends no request.
+- **No credentials.** Vibe-Code never receives credentials. There is no environment variable, CLI option or config
+  key for credentials; `credentials_read` is always `false`. Credential-shaped field names are rejected anywhere in
+  the file, and credential-shaped values are redacted (see "Redaction" below).
+- **Request budget.** Each area's `requests_count` must be an integer from 0 to 20. The total over all areas must also
+  be 20 or less. Negative numbers, non-integers, booleans and values over 20 are rejected. This checks the imported
+  evidence only; Vibe-Code sends nothing.
+- **Limits.** Imported results cover only the checks the external suite declares, against the target it ran on. They
+  do not prove that a remote application's authentication, sessions or authorization are secure. The gaps in
+  section 16 still apply.
+- **Evidence limitation.** Imported results prove only the evidence the external suite supplies. Vibe-Code validates
+  its shape (schema), safety (no credentials, redacted values, request budget) and consistency (status against
+  findings, evidence and `runtime_checks_executed`). It does not independently prove that the external requests
+  happened or that the reported responses were observed. `requests_count` and evidence items are checked for form
+  and limits, not replayed.
+
+### 17.1 Schema
+
+The schema version is `1.0`. The file is `tools/phase3-runtime-security/schemas/verification-results.schema.json`.
+The importer (`runtime_security/verification/importer.py`) is the authoritative validator.
+
+Required top-level fields:
+
+- `schema_version` must be `"1.0"`.
+- `kind` must be `"vibe-code-engineering/verification-results"`.
+- `producer` is `{name, version}`.
+- `target` is `{base_url}`. It must match the origin (scheme, host, port) of the Phase 3 target and contain no
+  credentials.
+- `areas` holds one or more of `authentication`, `session`, `authorization`, `idor_bola` and `tenant_isolation`.
+
+Fields of each area:
+
+| Field | Required | Rule |
+|---|---|---|
+| `status` | yes | one of the statuses in 17.3 |
+| `runtime_checks_executed` | yes | boolean |
+| `requests_count` | yes | integer 0-20 |
+| `findings` | no | up to 50 findings: `id`, `severity`, `confidence`, `title`, `endpoint`, `expected`, `actual`, `evidence`, `impact`, `recommendation`, `validation`, `status` (`OPEN`/`REQUIRES_REVIEW`); optional `cwe`, `owasp`, `notes` |
+| `evidence` | no | up to 50 items: `check`, `expected` and `observed` (`allowed`/`denied`/`not_applicable`/`error`); optional `endpoint`; optional `fingerprint` (12 lower-case hex characters) |
+| `limitations` | no | up to 20 strings |
+
+Unknown fields are rejected. Validation is all-or-nothing. If any rule is broken, the whole import is rejected: every
+configured area becomes INCOMPLETE, no imported finding is reported, and the Phase 3 exit code is 3.
+
+### 17.2 Namespaces
+
+Each area accepts findings only in its own namespace:
+
+| Area | Namespace |
+|---|---|
+| `authentication` | `RT-AUTH-NNN` |
+| `session` | `RT-SESSION-NNN` |
+| `authorization` | `RT-AUTHZ-NNN` |
+| `idor_bola` | `RT-IDOR-NNN` |
+| `tenant_isolation` | `RT-TENANT-NNN` |
+
+The following are rejected: invalid IDs, IDs from another namespace, and duplicate IDs. IDs are kept exactly as
+imported and are listed in sorted order, so the same file always gives the same report.
+
+No finding is ever created because an area is NOT VERIFIED or INCOMPLETE.
+
+Severity keeps the existing semantics: blocking means CRITICAL, or HIGH with MEDIUM/HIGH confidence. In SARIF,
+imported findings are ordinary Phase 3 runtime results.
+
+### 17.3 Status semantics
+
+Statuses: `NOT CONFIGURED`, `READY`, `EXECUTED`, `PASS`, `FAIL`, `INCOMPLETE`, `NOT VERIFIED`. The rules live in
+`runtime_security/verification/status.py`.
+
+When the import is missing, unused or unusable:
+
+| Situation | Status |
+|---|---|
+| No `verification_results` configured | `verification_import` is NOT CONFIGURED; all areas keep their existing NOT VERIFIED status |
+| Configured, but the safety gate refused the target | `verification_import` is READY; results are not applied |
+| File missing, malformed or rejected | every area INCOMPLETE |
+| An area is absent from a valid file | that area is NOT VERIFIED |
+
+When an area is present, its `runtime_checks_executed` flag decides the result:
+
+- **Checks not executed.** A claimed READY, NOT VERIFIED, NOT CONFIGURED or INCOMPLETE is kept. A claimed PASS, FAIL or
+  EXECUTED is ambiguous and becomes INCOMPLETE.
+- **Checks executed.**
+  - PASS needs at least one request, at least one evidence item and no findings.
+  - FAIL needs at least one request and at least one finding; the finding is the proven unauthorized access.
+  - EXECUTED needs at least one request. It becomes FAIL if findings are present.
+  - Every other combination is ambiguous and becomes INCOMPLETE.
+
+NOT VERIFIED never becomes PASS on its own.
+
+The overall Authorization status combines its three sub-areas:
+
+1. FAIL if any sub-area is FAIL.
+2. Otherwise INCOMPLETE if any sub-area is INCOMPLETE.
+3. Otherwise PASS only if all three are PASS.
+4. Otherwise EXECUTED if any sub-area is PASS or EXECUTED (partial coverage).
+5. Otherwise READY if any sub-area is READY.
+6. Otherwise NOT VERIFIED.
+
+The reader and security-ci re-check the report:
+
+- A PASS or EXECUTED claim without `runtime_checks_executed: true` is treated as NOT VERIFIED. For sub-areas, the same
+  applies to FAIL.
+- An imported block with an invalid `requests_count` becomes INCOMPLETE.
+- In security-ci, an INCOMPLETE import is listed as an incomplete input. Unless `--allow-incomplete` is set, this fails
+  the gate.
+
+### 17.4 Redaction
+
+Credential-shaped field names are rejected anywhere in the file (areas under `areas` are exempt): names containing
+password, secret, token, cookie, bearer, authorization, API key, session ID or credential, and `sid`, `pwd`, `auth`,
+`session`. Error messages name fields only, never values.
+
+Every string value is redacted as it is imported. The following become `<redacted>`:
+
+- header lines for `Cookie`, `Set-Cookie`, `Authorization`, `X-API-Key` and `X-Auth-Token`;
+- Bearer, Basic, Digest and Token values;
+- every query-string value;
+- the runtime redaction patterns: `key=value` secrets, JWTs, keys, URL credentials and long tokens.
+
+Reports contain only safe metadata: statuses, counts, check names, allowed/denied observations, fingerprints and
+redacted text. security-ci redacts everything again before writing SARIF.
