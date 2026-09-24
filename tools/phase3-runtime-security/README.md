@@ -39,12 +39,17 @@ unauthenticated only - not proof of security. `zap-full-scan.py` / `zap-api-scan
 | Tenant isolation | NOT VERIFIED (3C status only) |
 
 The JSON report carries `auth_areas` (Authentication, Session) and `authorization` (status, reason, scope,
-`runtime_checks_executed: false`, `credentials_read: false`); the Markdown report has `## Authorization` and
-`## Authorization Findings`. `RT-AUTHZ-*` is reserved for future imported results; none are generated.
+`runtime_checks_executed: false`, `credentials_read: false`, and `subareas` `authorization`, `idor_bola`,
+`tenant_isolation`, each always NOT VERIFIED with no findings); the Markdown report has `## Authorization` (with a
+sub-area table) and `## Authorization Findings`. `RT-AUTHZ-*`, `RT-IDOR-*` and `RT-TENANT-*` are reserved for future
+results; none are generated. Readers treat a report without `subareas` as all three NOT VERIFIED.
 NOT VERIFIED is a coverage status, not a security verdict.
 
 **Not covered yet:** authentication, authorization, IDOR/BOLA, tenant isolation, CSRF, rate limiting,
-file access, webhooks, business logic.
+file access, webhooks, business logic. A possible future design for bounded authentication, session, authorization,
+IDOR/BOLA and tenant-isolation verification is in
+[docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md](../../docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md) (design only; not
+implemented - these areas remain NOT VERIFIED).
 
 ## Install / run
 
@@ -95,7 +100,7 @@ Allowed: local target
 
 IDs `RT-<CATEGORY>-NNN` (`RT-HEADERS-001`, `RT-COOKIE-001`, `RT-CORS-001`, `RT-REDIRECT-001`, `RT-TLS-001`,
 `RT-ERROR-001`; optional ZAP baseline: `RT-ZAP-001`; reserved for Phase 3B: `RT-AUTH-*`, `RT-SESSION-*`; reserved for
-3C imported results: `RT-AUTHZ-*`). Fields: `id, category, severity, confidence, title, endpoint, expected, actual, evidence,
+3C imported results: `RT-AUTHZ-*`; reserved, none generated: `RT-IDOR-*`, `RT-TENANT-*`). Fields: `id, category, severity, confidence, title, endpoint, expected, actual, evidence,
 impact, recommendation, validation, status` plus `cwe, owasp, notes, source` and `blocking` in JSON.
 Severity/confidence/status vocabulary matches Phase 2.
 

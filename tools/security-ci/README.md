@@ -50,6 +50,7 @@ Without installing: `PYTHONPATH=src python -m security_ci.cli ...`.
 | Phase 3 | `RT-HEADERS/COOKIE/CORS/REDIRECT/TLS/ERROR-*`, `RT-AUTH-*`, `RT-SESSION-*` | `phase3-runtime-security` | `RT-<CATEGORY>/<title-slug>` |
 | ZAP baseline | `RT-ZAP-*` (source `OWASP ZAP`) | `phase3-runtime-security` | `zap/<ZAP alert id>` |
 | Authorization (reserved, imported only) | `RT-AUTHZ-*` | `phase3-runtime-security` | `RT-AUTHZ/<title-slug>`; keeps actor labels (A/B only), resource label, evidence count |
+| IDOR/BOLA, tenant isolation (reserved, none generated) | `RT-IDOR-*`, `RT-TENANT-*` | `phase3-runtime-security` | `RT-IDOR/<title-slug>`, `RT-TENANT/<title-slug>`; accepted if present, never synthesized |
 | AI review | `AI-*` | `ai-code-review` | `ai/<category>` |
 
 Each result keeps: finding ID (`properties.findingId`, `partialFingerprints`), title, description, severity,

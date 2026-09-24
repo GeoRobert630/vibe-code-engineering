@@ -31,9 +31,14 @@ AREAS = [
     ("tls", "TLS"),
     ("error_leakage", "Error leakage"),
 ]
-# Phase 3A categories plus Phase 3B plumbing categories (AUTH/SESSION).
-FINDING_ID = re.compile(r"^RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ)-\d{3}$")
+# Phase 3A categories plus Phase 3B plumbing categories (AUTH/SESSION) and reserved authorization
+# namespaces (AUTHZ, IDOR, TENANT; none are generated yet).
+FINDING_ID = re.compile(r"^RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ|IDOR|TENANT)-\d{3}$")
 AUTH_AREAS = [("authentication", "Authentication"), ("session", "Session")]
+# Authorization sub-areas: (key, label, finding category). Reports without them default to NOT VERIFIED.
+AUTHZ_SUBAREAS = [("authorization", "Authorization", "authorization"), ("idor_bola", "IDOR/BOLA", "idor"),
+                  ("tenant_isolation", "Tenant isolation", "tenant_isolation")]
+AUTHZ_STATUSES = ("PASS", "FAIL", "NOT CONFIGURED", "NOT VERIFIED", "INCOMPLETE")
 REQUIRED_FINDING_FIELDS = {
     "id", "category", "severity", "confidence", "title", "endpoint", "expected", "actual",
     "evidence", "impact", "recommendation", "validation", "status",
@@ -121,6 +126,7 @@ def build_summary(data: dict) -> dict:
             az_status = "NOT VERIFIED"
         areas.append({"area": "Authorization", "check": "authorization", "status": az_status, "detail": clean(az.get("reason"), 300),
                       "findings": [f["id"] for f in data["findings"] if f["category"] == "authorization"]})
+    authorization_subareas = authz_subareas(az, data["findings"], refused)
     zap = data.get("zap") if isinstance(data.get("zap"), dict) else {}
     zap_summary = {
         "available": zap.get("available") is True,
@@ -152,10 +158,35 @@ def build_summary(data: dict) -> dict:
         "findings_by_severity": data["summary"].get("findings_by_severity"),
         "blocking": [f["id"] for f in data["findings"] if f.get("blocking")],
         "areas": areas,
+        "authorization_subareas": authorization_subareas,
         "findings": data["findings"],
         "limitations": data["limitations"],
         "not_covered_by_phase3a": NOT_COVERED,
     }
+
+
+def authz_subareas(az: dict | None, findings: list[dict], refused: bool) -> list[dict]:
+    """Authorization / IDOR/BOLA / tenant-isolation sub-areas. A missing block defaults to NOT VERIFIED.
+
+    A reported PASS/FAIL is only kept when the block says runtime checks were executed; no finding is synthesized.
+    """
+    blocks = az.get("subareas") if isinstance(az, dict) and isinstance(az.get("subareas"), dict) else {}
+    out = []
+    for key, label, category in AUTHZ_SUBAREAS:
+        b = blocks.get(key) if isinstance(blocks.get(key), dict) else None
+        executed = b is not None and b.get("runtime_checks_executed") is True
+        status = b.get("status") if b is not None and b.get("status") in AUTHZ_STATUSES else "NOT VERIFIED"
+        if refused or (status in ("PASS", "FAIL") and not executed):
+            status = "NOT VERIFIED"
+        out.append({
+            "key": key, "area": label, "status": status,
+            "detail": clean(b.get("reason"), 200) if b is not None else "not reported by this runtime report",
+            "reported": b is not None,
+            "runtime_checks_executed": executed,
+            "credentials_read": b is not None and b.get("credentials_read") is True,
+            "findings": [f["id"] for f in findings if f["category"] == category],
+        })
+    return out
 
 
 def render(s: dict) -> str:
@@ -177,6 +208,10 @@ def render(s: dict) -> str:
         "AREA STATUS:",
     ]
     out += [f"- {a['area']}: {a['status']} ({clean(a['detail'], 160)})" + (f" [{', '.join(a['findings'])}]" if a["findings"] else "") for a in s["areas"]]
+    out += ["", "AUTHORIZATION SUB-AREAS:"]
+    out += [f"- {a['area']}: {a['status']} (runtime checks executed: {'yes' if a['runtime_checks_executed'] else 'no'}; "
+            f"credentials read: {'yes' if a['credentials_read'] else 'no'}; {clean(a['detail'], 160)})"
+            + (f" [{', '.join(a['findings'])}]" if a["findings"] else "") for a in s["authorization_subareas"]]
     out += ["", f"RUNTIME FINDINGS ({len(s['findings'])}):"]
     for f in s["findings"]:
         out.append(

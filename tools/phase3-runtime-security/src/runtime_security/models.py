@@ -54,8 +54,11 @@ ID_PREFIX = {
     "zap": "ZAP",
     # Reserved for future imported authorization results (Phase 3C); none are generated.
     "authorization": "AUTHZ",
+    # Reserved for future IDOR/BOLA and tenant-isolation results (design only); none are generated.
+    "idor": "IDOR",
+    "tenant_isolation": "TENANT",
 }
-FINDING_ID_RE = r"RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ)-\d{3}"
+FINDING_ID_RE = r"RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ|IDOR|TENANT)-\d{3}"
 
 
 @dataclass

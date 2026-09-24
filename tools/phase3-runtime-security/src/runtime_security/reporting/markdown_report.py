@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .. import TOOL_NAME, __version__
 from ..auth.status import AUTH_CATEGORIES, auth_area_status, auth_config_summary, report_zap
-from ..authz.status import CATEGORY as AUTHZ_CATEGORY
+from ..authz.status import CATEGORIES as AUTHZ_CATEGORIES
 from ..authz.status import authz_area_status
 from ..models import SEVERITY_ORDER, Outcome
 from ..runner import LIMITATIONS, RunReport, is_blocking
@@ -48,7 +48,7 @@ def render(report: RunReport) -> str:
     L += ["## Failed", ""] + _results_table(report.results(Outcome.FAILED))
     L += ["## Not Verified", ""] + _results_table(report.results(Outcome.NOT_VERIFIED) + report.results(Outcome.NOT_APPLICABLE))
     L += ["## Findings", ""]
-    phase3a_findings = [f for f in report.findings if f.category not in AUTH_CATEGORIES and f.category not in ("zap", AUTHZ_CATEGORY)]
+    phase3a_findings = [f for f in report.findings if f.category not in AUTH_CATEGORIES and f.category not in ("zap", *AUTHZ_CATEGORIES)]
     if not phase3a_findings:
         L += ["No findings for the checks performed. This does not cover authorization, IDOR or other runtime areas (see Limitations).", ""]
     L += _findings(phase3a_findings)
@@ -91,8 +91,10 @@ def _authz_section(report: RunReport) -> list[str]:
     a = authz_area_status(report.findings, report.refused)
     L = ["## Authorization", "", f"Status: **{a['status']}**", "", "Reason:", "", esc(a["reason"]), "",
          "Scope: " + esc(", ".join(a["scope"])) + ". Runtime authorization checks executed: no. Credentials read: no.", ""]
-    L += ["## Authorization Findings", ""]
-    items = [f for f in report.findings if f.category == AUTHZ_CATEGORY]
+    L += ["| Sub-area | Status | Reserved namespace | Runtime checks executed | Credentials read |", "|---|---|---|---|---|"]
+    L += [f"| {esc(s['area'])} | {s['status']} | `{s['namespace']}` | no | no |" for s in a["subareas"].values()]
+    L += ["", "## Authorization Findings", ""]
+    items = [f for f in report.findings if f.category in AUTHZ_CATEGORIES]
     return L + (_findings(items) if items else ["None.", ""])
 
 
