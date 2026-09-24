@@ -1,0 +1,723 @@
+# Example: Engineering CI - orchestrates the existing Security CI and Quality CI tools and produces one result.
+#
+#   Engineering CI
+#       -> Security CI    (job "security":    Phase 2, optional Phase 3A + optional passive ZAP baseline, SARIF, security gate)
+#       -> Quality CI     (job "quality":     accessibility via quality-ci, JSON/Markdown/SARIF, quality gate)
+#       -> Performance CI (job "performance": lab performance via quality-ci-perf, JSON/Markdown/SARIF, performance gate)
+#       -> Collect reports (separate artifacts: security-reports/, quality-reports/, performance-reports/, engineering-reports/)
+#          SARIF is uploaded from a copy whose runs[].automationDetails.id is the upload category (one code-scanning
+#          category per gate and per artifact_suffix); the report artifacts keep the tools' original SARIF.
+#       -> Combined result (job "engineering": engineering-summary.json, fails when any of the three gates fails)
+#
+# Copy to .github/workflows/engineering-ci.yml in the project to check. Orchestration only: every scanner, gate,
+# severity rule and SARIF format is the existing tool's own; nothing here creates or changes findings.
+#
+# Pinned tooling (GeoRobert630/vibe-code-engineering). Exact reviewed commits are pinned instead of a branch so a
+# change to the toolkit can never alter this project's CI result (or run unreviewed code) without an explicit,
+# reviewed update of these SHAs:
+#   security job -> bd71c46f1584063254dfc0b668fcff2ba0ea26d0  (tag security-baseline-v1)
+#   quality job  -> fa816aad46fb46f3dade2173b53da5d920177e21  (tag quality-ci-v1.1)
+#   performance job -> c6b82c0739f0342a3ac6b2952532e86343985e1f  (tag quality-ci-v1.2; hosted-calibrated MIN_BENCHMARK)
+#
+# Configuration uses repository *variables* already supported by the Security CI and Quality CI examples; no
+# secrets, tokens, passwords or cookies are used:
+#   RUNTIME_TARGET_URL, RUNTIME_ENVIRONMENT, RUNTIME_AUTHORIZED_BY, ENABLE_ZAP_BASELINE, SECURITY_GATE_POLICY
+#   QUALITY_TARGET_URL, QUALITY_ENVIRONMENT, QUALITY_AUTHORIZED_BY, QUALITY_PAGES, QUALITY_GATE_POLICY
+#   PERF_PROFILE, PERF_GATE_POLICY (Quality CI performance example; the performance job uses the QUALITY_* target)
+# Without RUNTIME_TARGET_URL, Phase 3 is not run and Authentication, Session and Authorization are reported
+# NOT VERIFIED (coverage status, not findings, never a runtime PASS). Without QUALITY_TARGET_URL, accessibility is
+# NOT CONFIGURED, and so is performance. The ZAP baseline stays optional and passive (zap-baseline.py only, image never
+# pulled). Each gate keeps its own policy and finding namespace (security P2-*/RT-*/AI-*, Q-A11Y-*, Q-PERF-*).
+#
+# The same file can be called as a reusable workflow (workflow_call) with inputs, e.g. to scan a subdirectory or a
+# static site served on 127.0.0.1 inside the job. A combined PASS does not mean every verification area is complete.
+name: engineering-ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      project_path:
+        description: "Directory inside the repository to check (default: repository root)"
+        type: string
+        default: "."
+      quality_site_dir:
+        description: "Directory under project_path served on 127.0.0.1 for the accessibility and performance scans (static sites); overrides QUALITY_TARGET_URL"
+        type: string
+        default: ""
+      quality_pages:
+        description: "Space-separated page paths for the accessibility and performance scans (default: QUALITY_PAGES or /)"
+        type: string
+        default: ""
+      artifact_suffix:
+        description: "Suffix for artifact names and SARIF categories when called several times in one run"
+        type: string
+        default: ""
+      enforce:
+        description: "Fail the engineering job when the combined result is FAIL"
+        type: boolean
+        default: true
+    outputs:
+      overall:
+        value: ${{ jobs.engineering.outputs.overall }}
+      security_status:
+        value: ${{ jobs.engineering.outputs.security_status }}
+      security_gate:
+        value: ${{ jobs.engineering.outputs.security_gate }}
+      quality_status:
+        value: ${{ jobs.engineering.outputs.quality_status }}
+      quality_gate:
+        value: ${{ jobs.engineering.outputs.quality_gate }}
+      performance_status:
+        value: ${{ jobs.engineering.outputs.performance_status }}
+      performance_gate:
+        value: ${{ jobs.engineering.outputs.performance_gate }}
+      authentication:
+        value: ${{ jobs.engineering.outputs.authentication }}
+      session:
+        value: ${{ jobs.engineering.outputs.session }}
+      authorization:
+        value: ${{ jobs.engineering.outputs.authorization }}
+
+permissions:
+  actions: read            # SARIF upload: workflow run metadata
+  contents: read
+  security-events: write   # SARIF upload (security, accessibility and performance categories)
+
+env:
+  SECURITY_TOOLING_REF: bd71c46f1584063254dfc0b668fcff2ba0ea26d0   # security-baseline-v1
+  QUALITY_TOOLING_REF: fa816aad46fb46f3dade2173b53da5d920177e21    # quality-ci-v1.1
+  PERFORMANCE_TOOLING_REF: c6b82c0739f0342a3ac6b2952532e86343985e1f   # quality-ci-v1.2
+
+jobs:
+  security:
+    name: Security CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROJECT_PATH: ${{ inputs.project_path || '.' }}
+      SUFFIX: ${{ inputs.artifact_suffix || '' }}
+      RUNTIME_TARGET_URL: ${{ vars.RUNTIME_TARGET_URL }}
+      RUNTIME_ENVIRONMENT: ${{ vars.RUNTIME_ENVIRONMENT || 'staging' }}
+      RUNTIME_AUTHORIZED_BY: ${{ vars.RUNTIME_AUTHORIZED_BY }}
+      ENABLE_ZAP_BASELINE: ${{ vars.ENABLE_ZAP_BASELINE || 'false' }}
+      SECURITY_GATE_POLICY: ${{ vars.SECURITY_GATE_POLICY || 'release' }}
+    outputs:
+      status: ${{ steps.gate.outputs.status }}
+      gate_result: ${{ steps.gate.outputs.gate_result }}
+      gate_exit_code: ${{ steps.gate.outputs.gate_exit_code }}
+      runtime: ${{ steps.gate.outputs.runtime }}
+      authentication: ${{ steps.gate.outputs.authentication }}
+      session: ${{ steps.gate.outputs.session }}
+      authorization: ${{ steps.gate.outputs.authorization }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          fetch-depth: 100
+          persist-credentials: false
+
+      - name: Checkout security tooling (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: GeoRobert630/vibe-code-engineering
+          ref: ${{ env.SECURITY_TOOLING_REF }}
+          path: security-tooling
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install security tools
+        run: |
+          python -m pip install ./security-tooling/tools/phase2-security-scanner ./security-tooling/tools/phase3-runtime-security ./security-tooling/tools/security-ci
+
+      - name: Phase 2 - static scan
+        id: phase2
+        run: |
+          set +e
+          phase2-scan "project/$PROJECT_PATH" --output security-reports/phase2 --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Phase 3 - runtime checks (skipped without a configured target)
+        id: phase3
+        run: |
+          if [ -z "$RUNTIME_TARGET_URL" ]; then
+            echo "::notice title=Phase 3 skipped::No RUNTIME_TARGET_URL configured - Phase 3A runtime checks and ZAP baseline NOT RUN; runtime areas are NOT VERIFIED."
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p security-reports/phase3
+          python - <<'PY'
+          import os, yaml
+          cfg = {
+              "target": {"base_url": os.environ["RUNTIME_TARGET_URL"], "environment": os.environ["RUNTIME_ENVIRONMENT"], "production": False},
+              "zap_baseline": {"enabled": os.environ["ENABLE_ZAP_BASELINE"] == "true"},
+          }
+          if os.environ.get("RUNTIME_AUTHORIZED_BY"):
+              cfg["target"].update({"authorized": True, "authorized_by": os.environ["RUNTIME_AUTHORIZED_BY"]})
+          open("security-reports/phase3/runtime-security.yaml", "w").write(yaml.safe_dump(cfg, sort_keys=False))
+          PY
+          set +e
+          runtime-security --config security-reports/phase3/runtime-security.yaml --output security-reports/phase3 --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          echo "ran=true" >> "$GITHUB_OUTPUT"
+
+      - name: Security SARIF export
+        id: sarif
+        env:
+          PHASE3_RAN: ${{ steps.phase3.outputs.ran }}
+        run: |
+          ARGS="--phase2 security-reports/phase2/security-report.json"
+          if [ "$PHASE3_RAN" = "true" ]; then
+            ARGS="$ARGS --phase3 security-reports/phase3/runtime-security-report.json --runtime-anchor project/.github/workflows/engineering-ci.yml"
+          fi
+          security-ci sarif $ARGS --sarif security-reports/security.sarif
+          if [ -s security-reports/security.sarif ]; then
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Security SARIF export::security-reports/security.sarif was not created"
+            exit 1
+          fi
+
+      - name: Security gate
+        id: gate
+        if: ${{ !cancelled() }}
+        env:
+          PHASE3_RAN: ${{ steps.phase3.outputs.ran }}
+          PHASE3_EXIT: ${{ steps.phase3.outputs.exit_code }}
+        run: |
+          mkdir -p security-reports
+          ARGS="--phase2 security-reports/phase2/security-report.json"
+          if [ "$PHASE3_RAN" = "true" ]; then
+            ARGS="$ARGS --phase3 security-reports/phase3/runtime-security-report.json"
+          fi
+          set +e
+          security-ci gate $ARGS --fail-on "$SECURITY_GATE_POLICY" > security-reports/security-gate.txt 2>&1
+          code=$?
+          # Same gate, incomplete scans tolerated: tells a policy violation apart from an incomplete scan.
+          security-ci gate $ARGS --fail-on "$SECURITY_GATE_POLICY" --allow-incomplete > /dev/null 2>&1
+          lenient=$?
+          set -e
+          cat security-reports/security-gate.txt
+          if [ "$code" = "0" ]; then status=PASS
+          elif [ "$code" = "1" ] && [ "$lenient" = "1" ]; then status=FAIL
+          else status=INCOMPLETE; fi
+          gate_result=$([ "$code" = "0" ] && echo PASS || echo FAIL)
+          area() { v=$(sed -n "s/^$1: //p" security-reports/security-gate.txt | head -n1 | tr -d '\r'); echo "${v:-NOT VERIFIED}"; }
+          {
+            echo "status=$status"
+            echo "gate_result=$gate_result"
+            echo "gate_exit_code=$code"
+            # NOT RUN (no target) / INCOMPLETE (runtime-security exit 3: refused or could not complete) / EXECUTED
+            if [ "$PHASE3_RAN" != "true" ]; then echo "runtime=NOT RUN"
+            elif [ "$PHASE3_EXIT" = "3" ]; then echo "runtime=INCOMPLETE"
+            else echo "runtime=EXECUTED"; fi
+            echo "authentication=$(area Authentication)"
+            echo "session=$(area Session)"
+            echo "authorization=$(area Authorization)"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$status" != "PASS" ]; then
+            echo "::error title=Security gate::Security $status (security-ci gate exit $code, policy $SECURITY_GATE_POLICY)"
+          fi
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports${{ env.SUFFIX }}
+          path: security-reports/
+          retention-days: 30
+
+      - name: Prepare security SARIF for upload (unique code-scanning category)
+        id: sarif_upload
+        if: ${{ !cancelled() && steps.sarif.outputs.created == 'true' }}
+        env:
+          SARIF_IN: security-reports/security.sarif
+          SARIF_OUT: sarif-upload/security.sarif
+          SARIF_CATEGORY: vibe-code-engineering-security${{ env.SUFFIX }}
+        run: |
+          # The tool's SARIF carries its own runs[].automationDetails.id (e.g. vibe-code-engineering/phase2/), which
+          # upload-sarif never overwrites with its `category` input - so every upload of the same tool would share one
+          # code-scanning category and replace the previous one. Upload a copy whose runs all carry this upload's
+          # category instead; the original file stays unchanged in the report artifact.
+          python - <<'PY'
+          import json, os, pathlib
+          src, dst = pathlib.Path(os.environ["SARIF_IN"]), pathlib.Path(os.environ["SARIF_OUT"])
+          category = os.environ["SARIF_CATEGORY"]
+          automation_id = category if category.endswith("/") else category + "/"   # as upload-sarif derives it
+          doc = json.loads(src.read_text(encoding="utf-8"))
+          for run in doc.get("runs", []):
+              run.setdefault("automationDetails", {})["id"] = automation_id
+          dst.parent.mkdir(parents=True, exist_ok=True)
+          dst.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          print(f"{dst}: {len(doc.get('runs', []))} run(s) -> automationDetails.id {automation_id}")
+          PY
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload security SARIF
+        if: ${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: sarif-upload/security.sarif
+          category: vibe-code-engineering-security${{ env.SUFFIX }}
+
+  quality:
+    name: Quality CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PROJECT_PATH: ${{ inputs.project_path || '.' }}
+      SUFFIX: ${{ inputs.artifact_suffix || '' }}
+      QUALITY_SITE_DIR: ${{ inputs.quality_site_dir || '' }}
+      QUALITY_TARGET_URL: ${{ vars.QUALITY_TARGET_URL }}
+      QUALITY_ENVIRONMENT: ${{ vars.QUALITY_ENVIRONMENT || 'staging' }}
+      QUALITY_AUTHORIZED_BY: ${{ vars.QUALITY_AUTHORIZED_BY }}
+      QUALITY_PAGES: ${{ inputs.quality_pages || vars.QUALITY_PAGES || '/' }}
+      QUALITY_GATE_POLICY: ${{ vars.QUALITY_GATE_POLICY || 'release' }}
+    outputs:
+      status: ${{ steps.gate.outputs.status }}
+      gate_result: ${{ steps.gate.outputs.gate_result }}
+      gate_exit_code: ${{ steps.gate.outputs.gate_exit_code }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          persist-credentials: false
+
+      - name: Checkout quality tooling (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: GeoRobert630/vibe-code-engineering
+          ref: ${{ env.QUALITY_TOOLING_REF }}
+          path: quality-tooling
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install quality-ci
+        run: python -m pip install "./quality-tooling/tools/quality-ci[browser]"
+
+      - name: Serve static site locally (only with quality_site_dir)
+        if: ${{ env.QUALITY_SITE_DIR != '' }}
+        run: |
+          nohup python -m http.server 8000 --bind 127.0.0.1 --directory "project/$PROJECT_PATH/$QUALITY_SITE_DIR" > http-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8000/ && exit 0
+            sleep 1
+          done
+          echo "::error title=Local server::static server did not start"
+          exit 1
+
+      - name: Accessibility scan (NOT CONFIGURED without a target)
+        id: a11y
+        run: |
+          mkdir -p quality-reports
+          if [ -n "$QUALITY_SITE_DIR" ]; then
+            TARGET=http://127.0.0.1:8000; ENVIRONMENT=local; AUTHORIZED_BY=
+          else
+            TARGET="$QUALITY_TARGET_URL"; ENVIRONMENT="$QUALITY_ENVIRONMENT"; AUTHORIZED_BY="$QUALITY_AUTHORIZED_BY"
+          fi
+          if [ -z "$TARGET" ]; then
+            echo "::notice title=Accessibility not configured::No QUALITY_TARGET_URL - accessibility NOT VERIFIED."
+            quality-ci a11y --output quality-reports --format both
+            exit 0
+          fi
+          TARGET="$TARGET" ENVIRONMENT="$ENVIRONMENT" AUTHORIZED_BY="$AUTHORIZED_BY" python - <<'PY'
+          import os, yaml
+          cfg = {
+              "target": {"base_url": os.environ["TARGET"], "environment": os.environ["ENVIRONMENT"], "production": False},
+              "pages": os.environ["QUALITY_PAGES"].split(),
+              "browser": {"channel": "chrome"},
+          }
+          if os.environ.get("AUTHORIZED_BY"):
+              cfg["target"].update({"authorized": True, "authorized_by": os.environ["AUTHORIZED_BY"]})
+          open("quality-reports/quality-ci.yaml", "w").write(yaml.safe_dump(cfg, sort_keys=False))
+          PY
+          set +e
+          quality-ci a11y --config quality-reports/quality-ci.yaml --output quality-reports --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Quality SARIF export
+        id: sarif
+        run: |
+          quality-ci sarif --report quality-reports/accessibility-report.json \
+                           --sarif quality-reports/accessibility.sarif --anchor project/.github/workflows/engineering-ci.yml
+          if [ -s quality-reports/accessibility.sarif ]; then
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Quality SARIF export::quality-reports/accessibility.sarif was not created"
+            exit 1
+          fi
+
+      - name: Quality gate
+        id: gate
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p quality-reports
+          set +e
+          quality-ci gate --report quality-reports/accessibility-report.json --fail-on "$QUALITY_GATE_POLICY" > quality-reports/quality-gate.txt 2>&1
+          code=$?
+          set -e
+          cat quality-reports/quality-gate.txt
+          outcome=$(sed -n 's/^Outcome: //p' quality-reports/quality-gate.txt | head -n1 | tr -d '\r')
+          case "$outcome" in
+            PASS|FAIL|INCOMPLETE|"NOT CONFIGURED") status="$outcome" ;;
+            *) status=INCOMPLETE ;;
+          esac
+          gate_result=$([ "$code" = "0" ] && echo PASS || echo FAIL)
+          {
+            echo "status=$status"
+            echo "gate_result=$gate_result"
+            echo "gate_exit_code=$code"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$gate_result" != "PASS" ]; then
+            echo "::error title=Quality gate::Quality $status (quality-ci gate exit $code, policy $QUALITY_GATE_POLICY)"
+          fi
+
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports${{ env.SUFFIX }}
+          path: quality-reports/
+          retention-days: 30
+
+      - name: Prepare quality SARIF for upload (unique code-scanning category)
+        id: sarif_upload
+        if: ${{ !cancelled() && steps.sarif.outputs.created == 'true' }}
+        env:
+          SARIF_IN: quality-reports/accessibility.sarif
+          SARIF_OUT: sarif-upload/accessibility.sarif
+          SARIF_CATEGORY: vibe-code-engineering-quality-accessibility${{ env.SUFFIX }}
+        run: |
+          # The tool's SARIF carries its own runs[].automationDetails.id (e.g. vibe-code-engineering/phase2/), which
+          # upload-sarif never overwrites with its `category` input - so every upload of the same tool would share one
+          # code-scanning category and replace the previous one. Upload a copy whose runs all carry this upload's
+          # category instead; the original file stays unchanged in the report artifact.
+          python - <<'PY'
+          import json, os, pathlib
+          src, dst = pathlib.Path(os.environ["SARIF_IN"]), pathlib.Path(os.environ["SARIF_OUT"])
+          category = os.environ["SARIF_CATEGORY"]
+          automation_id = category if category.endswith("/") else category + "/"   # as upload-sarif derives it
+          doc = json.loads(src.read_text(encoding="utf-8"))
+          for run in doc.get("runs", []):
+              run.setdefault("automationDetails", {})["id"] = automation_id
+          dst.parent.mkdir(parents=True, exist_ok=True)
+          dst.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          print(f"{dst}: {len(doc.get('runs', []))} run(s) -> automationDetails.id {automation_id}")
+          PY
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload quality SARIF
+        if: ${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: sarif-upload/accessibility.sarif
+          category: vibe-code-engineering-quality-accessibility${{ env.SUFFIX }}
+
+  performance:
+    name: Quality CI (performance)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROJECT_PATH: ${{ inputs.project_path || '.' }}
+      SUFFIX: ${{ inputs.artifact_suffix || '' }}
+      QUALITY_SITE_DIR: ${{ inputs.quality_site_dir || '' }}
+      QUALITY_TARGET_URL: ${{ vars.QUALITY_TARGET_URL }}
+      QUALITY_ENVIRONMENT: ${{ vars.QUALITY_ENVIRONMENT || 'staging' }}
+      QUALITY_AUTHORIZED_BY: ${{ vars.QUALITY_AUTHORIZED_BY }}
+      QUALITY_PAGES: ${{ inputs.quality_pages || vars.QUALITY_PAGES || '/' }}
+      PERF_PROFILE: ${{ vars.PERF_PROFILE || 'mobile-lab' }}
+      PERF_GATE_POLICY: ${{ vars.PERF_GATE_POLICY || 'release' }}
+    outputs:
+      status: ${{ steps.gate.outputs.status }}
+      gate_result: ${{ steps.gate.outputs.gate_result }}
+      gate_exit_code: ${{ steps.gate.outputs.gate_exit_code }}
+      timing_reliability: ${{ steps.gate.outputs.timing_reliability }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          persist-credentials: false
+
+      - name: Checkout performance tooling (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: GeoRobert630/vibe-code-engineering
+          ref: ${{ env.PERFORMANCE_TOOLING_REF }}
+          path: performance-tooling
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install quality-ci (performance)
+        run: python -m pip install "./performance-tooling/tools/quality-ci[browser]"
+
+      - name: Serve static site locally (only with quality_site_dir)
+        if: ${{ env.QUALITY_SITE_DIR != '' }}
+        run: |
+          nohup python -m http.server 8000 --bind 127.0.0.1 --directory "project/$PROJECT_PATH/$QUALITY_SITE_DIR" > http-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8000/ && exit 0
+            sleep 1
+          done
+          echo "::error title=Local server::static server did not start"
+          exit 1
+
+      - name: Performance measurement (NOT CONFIGURED without a target)
+        id: perf
+        run: |
+          mkdir -p performance-reports
+          if [ -n "$QUALITY_SITE_DIR" ]; then
+            TARGET=http://127.0.0.1:8000; ENVIRONMENT=local; AUTHORIZED_BY=
+          else
+            TARGET="$QUALITY_TARGET_URL"; ENVIRONMENT="$QUALITY_ENVIRONMENT"; AUTHORIZED_BY="$QUALITY_AUTHORIZED_BY"
+          fi
+          if [ -z "$TARGET" ]; then
+            echo "::notice title=Performance not configured::No QUALITY_TARGET_URL - performance NOT CONFIGURED."
+            quality-ci-perf perf --output performance-reports --format both
+            exit 0
+          fi
+          TARGET="$TARGET" ENVIRONMENT="$ENVIRONMENT" AUTHORIZED_BY="$AUTHORIZED_BY" python - <<'PY'
+          import os, yaml
+          cfg = {
+              "target": {"base_url": os.environ["TARGET"], "environment": os.environ["ENVIRONMENT"], "production": False},
+              "pages": os.environ["QUALITY_PAGES"].split(),
+              "profile": os.environ["PERF_PROFILE"],
+              "browser": {"channel": "chrome"},
+          }
+          if os.environ.get("AUTHORIZED_BY"):
+              cfg["target"].update({"authorized": True, "authorized_by": os.environ["AUTHORIZED_BY"]})
+          open("performance-reports/quality-perf.yaml", "w").write(yaml.safe_dump(cfg, sort_keys=False))
+          PY
+          set +e
+          quality-ci-perf perf --config performance-reports/quality-perf.yaml --output performance-reports --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Performance SARIF export
+        id: sarif
+        run: |
+          quality-ci-perf sarif --report performance-reports/performance-report.json \
+                                --sarif performance-reports/performance.sarif --anchor project/.github/workflows/engineering-ci.yml
+          if [ -s performance-reports/performance.sarif ]; then
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Performance SARIF export::performance-reports/performance.sarif was not created"
+            exit 1
+          fi
+
+      - name: Performance gate
+        id: gate
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p performance-reports
+          set +e
+          quality-ci-perf gate --report performance-reports/performance-report.json --fail-on "$PERF_GATE_POLICY" > performance-reports/performance-gate.txt 2>&1
+          code=$?
+          set -e
+          cat performance-reports/performance-gate.txt
+          outcome=$(sed -n 's/^Outcome: //p' performance-reports/performance-gate.txt | head -n1 | tr -d '\r')
+          case "$outcome" in
+            PASS|FAIL|INCOMPLETE|"NOT CONFIGURED") status="$outcome" ;;
+            *) status=INCOMPLETE ;;
+          esac
+          gate_result=$([ "$code" = "0" ] && echo PASS || echo FAIL)
+          reliability=$(sed -n 's/^Timing reliability: //p' performance-reports/performance-gate.txt | head -n1 | tr -d '\r')
+          {
+            echo "status=$status"
+            echo "gate_result=$gate_result"
+            echo "gate_exit_code=$code"
+            echo "timing_reliability=${reliability:-n/a}"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$gate_result" != "PASS" ]; then
+            echo "::error title=Performance gate::Performance $status (quality-ci-perf gate exit $code, policy $PERF_GATE_POLICY)"
+          fi
+
+      - name: Upload performance reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-reports${{ env.SUFFIX }}
+          path: performance-reports/
+          retention-days: 30
+
+      - name: Prepare performance SARIF for upload (unique code-scanning category)
+        id: sarif_upload
+        if: ${{ !cancelled() && steps.sarif.outputs.created == 'true' }}
+        env:
+          SARIF_IN: performance-reports/performance.sarif
+          SARIF_OUT: sarif-upload/performance.sarif
+          SARIF_CATEGORY: vibe-code-engineering-quality-performance${{ env.SUFFIX }}
+        run: |
+          # The tool's SARIF carries its own runs[].automationDetails.id (e.g. vibe-code-engineering/phase2/), which
+          # upload-sarif never overwrites with its `category` input - so every upload of the same tool would share one
+          # code-scanning category and replace the previous one. Upload a copy whose runs all carry this upload's
+          # category instead; the original file stays unchanged in the report artifact.
+          python - <<'PY'
+          import json, os, pathlib
+          src, dst = pathlib.Path(os.environ["SARIF_IN"]), pathlib.Path(os.environ["SARIF_OUT"])
+          category = os.environ["SARIF_CATEGORY"]
+          automation_id = category if category.endswith("/") else category + "/"   # as upload-sarif derives it
+          doc = json.loads(src.read_text(encoding="utf-8"))
+          for run in doc.get("runs", []):
+              run.setdefault("automationDetails", {})["id"] = automation_id
+          dst.parent.mkdir(parents=True, exist_ok=True)
+          dst.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          print(f"{dst}: {len(doc.get('runs', []))} run(s) -> automationDetails.id {automation_id}")
+          PY
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload performance SARIF
+        if: ${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: sarif-upload/performance.sarif
+          category: vibe-code-engineering-quality-performance${{ env.SUFFIX }}
+
+  engineering:
+    name: Engineering CI result
+    needs: [security, quality, performance]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      overall: ${{ steps.combined.outputs.overall }}
+      security_status: ${{ steps.combined.outputs.security_status }}
+      security_gate: ${{ steps.combined.outputs.security_gate }}
+      quality_status: ${{ steps.combined.outputs.quality_status }}
+      quality_gate: ${{ steps.combined.outputs.quality_gate }}
+      performance_status: ${{ steps.combined.outputs.performance_status }}
+      performance_gate: ${{ steps.combined.outputs.performance_gate }}
+      authentication: ${{ steps.combined.outputs.authentication }}
+      session: ${{ steps.combined.outputs.session }}
+      authorization: ${{ steps.combined.outputs.authorization }}
+    steps:
+      - name: Combined result
+        id: combined
+        env:
+          SUFFIX: ${{ inputs.artifact_suffix || '' }}
+          SECURITY_JOB: ${{ needs.security.result }}
+          SECURITY_STATUS: ${{ needs.security.outputs.status }}
+          SECURITY_GATE: ${{ needs.security.outputs.gate_result }}
+          SECURITY_GATE_EXIT: ${{ needs.security.outputs.gate_exit_code }}
+          SECURITY_RUNTIME: ${{ needs.security.outputs.runtime }}
+          AUTHENTICATION: ${{ needs.security.outputs.authentication }}
+          SESSION: ${{ needs.security.outputs.session }}
+          AUTHORIZATION: ${{ needs.security.outputs.authorization }}
+          QUALITY_JOB: ${{ needs.quality.result }}
+          QUALITY_STATUS: ${{ needs.quality.outputs.status }}
+          QUALITY_GATE: ${{ needs.quality.outputs.gate_result }}
+          QUALITY_GATE_EXIT: ${{ needs.quality.outputs.gate_exit_code }}
+          PERFORMANCE_JOB: ${{ needs.performance.result }}
+          PERFORMANCE_STATUS: ${{ needs.performance.outputs.status }}
+          PERFORMANCE_GATE: ${{ needs.performance.outputs.gate_result }}
+          PERFORMANCE_GATE_EXIT: ${{ needs.performance.outputs.gate_exit_code }}
+          PERFORMANCE_RELIABILITY: ${{ needs.performance.outputs.timing_reliability }}
+          ENFORCE: ${{ format('{0}', inputs.enforce) == 'false' && 'false' || 'true' }}
+        run: |
+          mkdir -p engineering-reports
+          python3 - <<'PY'
+          # Combines the three existing gate results. Creates no findings; coverage statuses are copied as reported.
+          import json, os
+
+          e = os.environ.get
+          suffix = e("SUFFIX", "")
+
+          def part(prefix, job, report, sarif):
+              gate = e(f"{prefix}_GATE") or ""
+              status = e(f"{prefix}_STATUS") or ""
+              if gate not in ("PASS", "FAIL") or not status:
+                  # The job did not reach its gate (tool error, cancellation): never counted as a pass.
+                  status, gate = "INCOMPLETE", "FAIL"
+              code = e(f"{prefix}_GATE_EXIT") or ""
+              return {"status": status, "gate_result": gate, "gate_exit_code": int(code) if code.lstrip("-").isdigit() else None,
+                      "job_result": e(f"{prefix}_JOB") or "unknown", "artifact": job + suffix,
+                      "report_path": report, "sarif_path": sarif}
+
+          security = part("SECURITY", "security-reports", "security-reports/phase2/security-report.json", "security-reports/security.sarif")
+          runtime = e("SECURITY_RUNTIME") or "NOT RUN"
+          security["runtime"] = runtime
+          if runtime != "NOT RUN":
+              security["runtime_report_path"] = "security-reports/phase3/runtime-security-report.json"
+          quality = part("QUALITY", "quality-reports", "quality-reports/accessibility-report.json", "quality-reports/accessibility.sarif")
+          performance = part("PERFORMANCE", "performance-reports", "performance-reports/performance-report.json",
+                             "performance-reports/performance.sarif")
+          performance["timing_reliability"] = e("PERFORMANCE_RELIABILITY") or "n/a"
+          enforced = e("ENFORCE", "true") != "false"
+          verification = {k: (e(k.upper()) or "NOT VERIFIED") for k in ("authentication", "session", "authorization")}
+          overall = "PASS" if all(p["gate_result"] == "PASS" for p in (security, quality, performance)) else "FAIL"
+          summary = {
+              "schema_version": "1.0",
+              "security": security,
+              "quality": quality,
+              "performance": performance,
+              "verification": verification,
+              "overall": overall,
+              "enforced": enforced,
+              "notice": ("Combined result of the existing security, accessibility and performance gates. Security findings "
+                         "(P2-*, RT-*, AI-*), accessibility findings (Q-A11Y-*) and performance findings (Q-PERF-*) remain "
+                         "separate and are not repeated here. A combined PASS does not mean every verification area is "
+                         "complete; NOT VERIFIED / NOT CONFIGURED are coverage statuses, not findings."),
+          }
+          with open("engineering-reports/engineering-summary.json", "w", encoding="utf-8") as fh:
+              json.dump(summary, fh, indent=2)
+              fh.write("\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"overall={overall}\n")
+              fh.write(f"security_status={security['status']}\nsecurity_gate={security['gate_result']}\n")
+              fh.write(f"quality_status={quality['status']}\nquality_gate={quality['gate_result']}\n")
+              fh.write(f"performance_status={performance['status']}\nperformance_gate={performance['gate_result']}\n")
+              for k, v in verification.items():
+                  fh.write(f"{k}={v}\n")
+          lines = [
+              f"## Engineering CI: {overall}", "",
+              "| Pipeline | Status | Gate |", "|---|---|---|",
+              f"| Security CI | {security['status']} | {security['gate_result']} |",
+              f"| Quality CI (accessibility) | {quality['status']} | {quality['gate_result']} |",
+              f"| Quality CI (performance) | {performance['status']} | {performance['gate_result']} |", "",
+              f"Security: {security['status']}", f"Accessibility: {quality['status']}", f"Performance: {performance['status']}",
+              f"Final enforcement: {overall}" + ("" if enforced else " (not enforced: enforce=false)"), "",
+              f"Performance timing reliability: {performance['timing_reliability']}.",
+              f"Phase 3 runtime: {runtime}. Authentication: {verification['authentication']}. "
+              f"Session: {verification['session']}. Authorization: {verification['authorization']}.", "",
+              "_A combined PASS does not mean every verification area is complete._",
+          ]
+          if e("GITHUB_STEP_SUMMARY"):
+              with open(e("GITHUB_STEP_SUMMARY"), "a", encoding="utf-8") as fh:
+                  fh.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          PY
+
+      - name: Upload engineering summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engineering-reports${{ inputs.artifact_suffix || '' }}
+          path: engineering-reports/
+          retention-days: 30
+
+      - name: Enforce combined result
+        env:
+          OVERALL: ${{ steps.combined.outputs.overall }}
+          # Only an explicit enforce: false (workflow_call) disables enforcement; push/pull_request/dispatch always enforce.
+          ENFORCE: ${{ format('{0}', inputs.enforce) == 'false' && 'false' || 'true' }}
+        run: |
+          if [ "$OVERALL" != "PASS" ]; then
+            if [ "$ENFORCE" = "true" ]; then
+              echo "::error title=Engineering CI::combined result ${OVERALL:-UNKNOWN}"
+              exit 1
+            fi
+            echo "::warning title=Engineering CI::combined result $OVERALL (not enforced: enforce=false)"
+          fi
