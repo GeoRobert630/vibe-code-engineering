@@ -1,3 +1,8 @@
 # Vendored axe-core is verified against a pinned SHA-256 (AXE_SHA256 in tools/quality-ci/src/quality_ci/engine.py).
 # It must be checked out byte-for-byte: no end-of-line conversion (e.g. core.autocrlf=true on Windows).
 tools/quality-ci/src/quality_ci/vendor/axe.min.js -text
+# Vendored web-vitals is verified against a pinned SHA-256 (WEB_VITALS_SHA256 in
+# tools/quality-ci/src/quality_ci/performance/engine.py); same byte-for-byte rule.
+tools/quality-ci/src/quality_ci/performance/vendor/web-vitals.attribution.iife.js -text
+# Performance fixtures: byte sizes are asserted exactly (deterministic budgets); keep them byte-for-byte.
+tools/quality-ci/fixtures/performance/** -text

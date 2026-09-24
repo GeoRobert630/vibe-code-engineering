@@ -132,3 +132,62 @@ redacted strings, deterministic output. No `security-severity`: platforms show t
 
 `python -m pytest` - browser tests (GOOD/BAD/FIXED fixtures in `fixtures/`, served locally) are skipped when
 Playwright or a Chromium-family browser is unavailable.
+
+---
+
+# Phase 4B: Performance (lab)
+
+`quality-ci-perf` measures explicitly configured local/development/staging pages in headless Chromium and gates on
+performance budgets. It shares the 4A safety gate, route model, credential rules and redaction; findings use the
+separate `Q-PERF-*` namespace. **Lab data only**: not field data, not proof of real-user performance.
+
+```bash
+quality-ci-perf perf  --config quality-perf.yaml --output reports [--sarif reports/performance.sarif]
+quality-ci-perf sarif --report reports/performance-report.json --sarif reports/performance.sarif
+quality-ci-perf gate  --report reports/performance-report.json [--fail-on release|critical|high|medium|low] \
+                      [--allow-incomplete] [--require-configured]
+```
+
+**Engine.** Chromium performance APIs plus vendored web-vitals 6.2.2 (`web-vitals.attribution.iife.js`, SHA-256
+`3ae0ee54...8b4e`, Apache-2.0, verified before every run). CPU is throttled via CDP; network throttling is not applied
+(responses pass through the safety route handler), so network cost is modelled (`model.critical-path`).
+
+**Checks.** Deterministic: `budget.total-bytes`, `budget.script-bytes`, `budget.stylesheet-bytes`, `budget.image-bytes`,
+`budget.font-bytes`, `budget.document-bytes`, `budget.request-count`, `budget.render-blocking` (sync head scripts,
+matching head stylesheets, CSS `@import` chains read from the CSSOM), `budget.dom-nodes`, `model.critical-path`.
+Timing (median of runs): `timing.fcp`, `timing.lcp`, `timing.cls`, `timing.tbt` (FCP to end of observation; not
+Lighthouse TBT). Diagnostics: unsized images, oversized images, text compression (not applicable on `local`).
+Recorded only: TTFB, DOMContentLoaded, load event, long-task count. INP is not measured.
+
+**Profiles.** `mobile-lab` (412x823, DPR 1.75, CPU 4x, model 150 ms / 1.6 Mbit/s; default) and `desktop-lab`
+(1350x940, DPR 1, CPU 1x, model 40 ms / 10 Mbit/s).
+
+**Default budgets (WARN > / FAIL >).** FCP 1800/3000 ms, LCP 2500/4000 ms, CLS 0.100/0.250, TBT 200/600 ms, total bytes
+1.6 MB/4 MB, script bytes 350 KB/1 MB, image bytes 1 MB/2.5 MB, requests 60/150, render-blocking 2/6, DOM nodes
+1,500/3,000, critical path 2000 ms (WARN only), diagnostics > 0 (LOW, never FAIL). Stylesheet/font/document bytes are
+measured and reported without a default budget. Overrides (`budgets:`) are allowed up to 10x the default and are
+always listed in the report.
+
+**Aggregation.** One discarded warm-up run plus 3-7 measured runs per page, each in a fresh browser context, strictly
+sequential, never retried. Equality passes. Timing FAIL needs a strict majority of runs above `fail` (floor(N/2)+1:
+2 of 3, 3 of 5); coefficient of variation > 0.35 makes a WARN/FAIL timing check `unstable` WARN; deterministic values
+must match across runs (otherwise `nondeterministic`, maximum used).
+
+**Host benchmark.** A fixed xorshift workload (5,000,000 iterations, unthrottled, median of 3) gives
+`benchmark_index = 100000 / ms`. Below `MIN_BENCHMARK`, `timing_reliability` is LOW and timing FAILs are capped at WARN;
+deterministic checks are never capped. `MIN_BENCHMARK = 1000` is **provisional (2026-09-24, local measurements
+only)**; it must be re-calibrated to 50% of the observed ubuntu-latest median before release.
+
+**Severity.** FAIL -> HIGH (blocking); WARN -> MEDIUM; diagnostic -> LOW; NOT MEASURED / nondeterministic -> INFORMATIONAL
+(needs review). CRITICAL is never used. SARIF: driver `quality-ci-performance`, ruleId `perf/<check_id>`, no
+`security-severity`, upload category `...-quality-performance`.
+
+**Limits.** pages 10 (cap 25), measured runs 3 (3-7), page timeout 30 s (cap 120), total 600 s (cap 1800), bytes per
+response/run 5 MB (cap 20 MB), requests per run 300 (cap 500), observation window 5000 ms (cap 15000). Not a load test.
+
+**Fixtures** (`fixtures/performance/`): GOOD -> PASS; SLOW -> FAIL (`timing.tbt`, `timing.cls`, `budget.dom-nodes`;
+WARN `budget.render-blocking`, `budget.script-bytes`, `model.critical-path`; LOW unsized image); FIXED -> PASS.
+SLOW fails on `budget.dom-nodes` even when timing is capped on a slow host.
+
+**Tests.** `python -m pytest` (browser tests skip without Playwright/Chromium). Repeatability (20x each fixture, no
+retries): `python -m pytest -m repeat tests/performance/test_repeat.py`.

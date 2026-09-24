@@ -1,0 +1,112 @@
+# Example: Quality CI Phase 4B (performance, lab) in GitHub Actions. Separate from Security CI, from the
+# accessibility example and from Engineering CI.
+#
+#   Performance (web-vitals + budgets, only with a safe target) -> JSON/Markdown -> SARIF -> performance gate
+#
+# Repository variables (never secrets; nothing here needs a credential):
+#   QUALITY_TARGET_URL, QUALITY_ENVIRONMENT, QUALITY_AUTHORIZED_BY, QUALITY_PAGES   (as in the accessibility example)
+#   PERF_PROFILE          mobile-lab | desktop-lab (default mobile-lab)
+#   PERF_GATE_POLICY      release | critical | high | medium | low (default release)
+#
+# Run the performance job on its own (do not share the job with heavy security or accessibility steps).
+# Uses the runner's preinstalled Google Chrome (browser.channel: chrome); no browser download.
+# Lab data under fixed emulation: a passing gate is not proof of real-user performance.
+name: quality-performance
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write   # SARIF upload (quality results; no security-severity)
+
+jobs:
+  performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QUALITY_TARGET_URL: ${{ vars.QUALITY_TARGET_URL }}
+      QUALITY_ENVIRONMENT: ${{ vars.QUALITY_ENVIRONMENT || 'staging' }}
+      QUALITY_AUTHORIZED_BY: ${{ vars.QUALITY_AUTHORIZED_BY }}
+      QUALITY_PAGES: ${{ vars.QUALITY_PAGES || '/' }}
+      PERF_PROFILE: ${{ vars.PERF_PROFILE || 'mobile-lab' }}
+      PERF_GATE_POLICY: ${{ vars.PERF_GATE_POLICY || 'release' }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          persist-credentials: false
+
+      - name: Checkout quality tooling
+        uses: actions/checkout@v4
+        with:
+          repository: YOUR-ORG/vibe-code-engineering   # replace; pin a reviewed commit SHA in real use
+          path: tooling
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install quality-ci
+        run: python -m pip install "./tooling/tools/quality-ci[browser]"
+
+      - name: Performance measurement (NOT CONFIGURED without a target)
+        id: perf
+        run: |
+          mkdir -p performance-reports
+          if [ -z "$QUALITY_TARGET_URL" ]; then
+            echo "::notice title=Performance not configured::No QUALITY_TARGET_URL - performance NOT VERIFIED."
+            quality-ci-perf perf --output performance-reports --format both
+            exit 0
+          fi
+          python - <<'PY'
+          import os, yaml
+          cfg = {
+              "target": {"base_url": os.environ["QUALITY_TARGET_URL"], "environment": os.environ["QUALITY_ENVIRONMENT"], "production": False},
+              "pages": os.environ["QUALITY_PAGES"].split(),
+              "profile": os.environ["PERF_PROFILE"],
+              "browser": {"channel": "chrome"},
+          }
+          if os.environ.get("QUALITY_AUTHORIZED_BY"):
+              cfg["target"].update({"authorized": True, "authorized_by": os.environ["QUALITY_AUTHORIZED_BY"]})
+          open("performance-reports/quality-perf.yaml", "w").write(yaml.safe_dump(cfg, sort_keys=False))
+          PY
+          set +e
+          quality-ci-perf perf --config performance-reports/quality-perf.yaml --output performance-reports --format both
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: SARIF export
+        id: sarif
+        run: |
+          quality-ci-perf sarif --report performance-reports/performance-report.json \
+                                --sarif performance-reports/performance.sarif --anchor project/.github/workflows/quality-performance.yml
+          if [ -s performance-reports/performance.sarif ]; then
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=SARIF export::performance-reports/performance.sarif was not created"
+            exit 1
+          fi
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-reports
+          path: performance-reports/
+          retention-days: 30
+
+      - name: Upload SARIF to code scanning
+        if: ${{ !cancelled() && steps.sarif.outputs.created == 'true' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: performance-reports/performance.sarif
+          category: vibe-code-engineering-quality-performance
+
+      - name: Performance gate
+        run: quality-ci-perf gate --report performance-reports/performance-report.json --fail-on "$PERF_GATE_POLICY"

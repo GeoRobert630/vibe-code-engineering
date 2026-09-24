@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- SLOW performance fixture: INTENTIONALLY SLOW, exists only for quality-ci tests. Harmless, local, static.
+     Render-blocking sync script (400 KB) and stylesheet with a 2-level @import chain; two post-FCP 700 ms tasks;
+     unsized image inserted above content at 500 ms; 3,200 generated DOM nodes. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Performance SLOW</title>
+  <script src="slow.js"></script>
+  <link rel="stylesheet" href="slow.css">
+</head>
+<body>
+  <main>
+    <h1>Slow page</h1>
+<p>Quality CI performance fixture. This paragraph is the main readable content of the page and is long enough to occupy a large part of the viewport so that any layout shift above it is measurable.</p>
+<p>Quality CI performance fixture. This paragraph is the main readable content of the page and is long enough to occupy a large part of the viewport so that any layout shift above it is measurable.</p>
+<p>Quality CI performance fixture. This paragraph is the main readable content of the page and is long enough to occupy a large part of the viewport so that any layout shift above it is measurable.</p>
+<p>Quality CI performance fixture. This paragraph is the main readable content of the page and is long enough to occupy a large part of the viewport so that any layout shift above it is measurable.</p>
+<ul id="items"></ul>
+<script>
+  (function () {
+    var ul = document.getElementById('items');
+    for (var i = 0; i < 1600; i++) {
+      var li = document.createElement('li'); var span = document.createElement('span');
+      span.textContent = 'Item ' + i; li.appendChild(span); ul.appendChild(li);
+    }
+  })();
+</script>
+  </main>
+</body>
+</html>
