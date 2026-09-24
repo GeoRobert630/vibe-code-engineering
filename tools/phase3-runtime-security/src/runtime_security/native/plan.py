@@ -1,6 +1,19 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Any
 from ..config import Config
+from .identity import SecretValue
+
+@dataclass
+class PlannedRequest:
+    area: str
+    check_id: str
+    method: str = "GET"
+    path: str = "/"
+    headers: Dict[str, Any] = field(default_factory=dict)
+    body: bytes | str | None = None
+    actor: str | None = None
+    expected: str = "allowed"
+    marker: str | None = None
 
 @dataclass
 class AreaPlan:
@@ -8,11 +21,13 @@ class AreaPlan:
     reason: str = ""
     requests_count: int = 0
     budget: int = 0
+    requests: List[PlannedRequest] = field(default_factory=list)
 
 @dataclass
 class NativePlan:
     areas: Dict[str, AreaPlan] = field(default_factory=dict)
     identity_setup_count: int = 0
+    setup_requests: List[PlannedRequest] = field(default_factory=list)
     total_verification_requests: int = 0
     total_budget: int = 20
     is_over_budget: bool = False
