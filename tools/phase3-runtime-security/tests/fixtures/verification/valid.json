@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "kind": "vibe-code-engineering/verification-results",
+  "producer": {"name": "example-authorized-suite", "version": "0.1.0"},
+  "target": {"base_url": "http://127.0.0.1:3000"},
+  "areas": {
+    "authentication": {
+      "status": "PASS",
+      "runtime_checks_executed": true,
+      "requests_count": 4,
+      "findings": [],
+      "evidence": [
+        {"check": "unauthenticated protected request", "expected": "denied", "observed": "denied", "endpoint": "GET /api/me"},
+        {"check": "invalid authentication attempt", "expected": "denied", "observed": "denied"}
+      ],
+      "limitations": ["Single configured login flow only."]
+    },
+    "session": {
+      "status": "EXECUTED",
+      "runtime_checks_executed": true,
+      "requests_count": 3,
+      "evidence": [{"check": "session continuity", "expected": "allowed", "observed": "allowed", "fingerprint": "0a1b2c3d4e5f"}],
+      "limitations": ["Session rotation not supported by the target; not verified."]
+    },
+    "authorization": {
+      "status": "PASS",
+      "runtime_checks_executed": true,
+      "requests_count": 2,
+      "evidence": [{"check": "low-privilege identity on privileged route", "expected": "denied", "observed": "denied", "endpoint": "GET /admin/settings"}],
+      "limitations": ["One privileged route declared."]
+    },
+    "idor_bola": {
+      "status": "FAIL",
+      "runtime_checks_executed": true,
+      "requests_count": 4,
+      "findings": [
+        {"id": "RT-IDOR-001", "severity": "HIGH", "confidence": "HIGH", "title": "Cross-user object access allowed",
+         "endpoint": "GET /api/documents/<id-of-other-user>", "expected": "denied (403/404)", "actual": "allowed (200)",
+         "evidence": "declared resource of actor B returned the ownership marker to actor A", "impact": "Users can read other users' documents.",
+         "recommendation": "Scope the document query by the authenticated owner.", "validation": "Repeat the declared cross-user check; expect a denial.",
+         "status": "OPEN", "cwe": "CWE-639", "notes": ["Check: actor A -> resource of actor B -> 200"]}
+      ],
+      "evidence": [
+        {"check": "actor A own resource", "expected": "allowed", "observed": "allowed"},
+        {"check": "actor A resource of actor B", "expected": "denied", "observed": "allowed"}
+      ],
+      "limitations": ["Two declared resources only; no enumeration."]
+    },
+    "tenant_isolation": {
+      "status": "PASS",
+      "runtime_checks_executed": true,
+      "requests_count": 4,
+      "evidence": [
+        {"check": "tenant A identity on tenant A resource", "expected": "allowed", "observed": "allowed"},
+        {"check": "tenant A identity on tenant B resource", "expected": "denied", "observed": "denied"}
+      ],
+      "limitations": ["Two declared tenants only."]
+    }
+  }
+}

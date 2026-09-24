@@ -11,6 +11,7 @@ from typing import Any
 
 from ..config import Config
 from ..models import Finding
+from ..verification.report import area_fields
 from ..zap.detect import ZapStatus, detect_zap
 
 AUTH_CATEGORIES = {"authentication": "Authentication", "session": "Session"}
@@ -26,7 +27,11 @@ def report_zap(report: Any) -> ZapStatus:
     return zap
 
 
-def auth_area_status(cfg: Config, findings: list[Finding], refused: bool, zap: ZapStatus | None = None) -> dict[str, dict[str, Any]]:
+def auth_area_status(cfg: Config, findings: list[Finding], refused: bool, zap: ZapStatus | None = None,
+                     imported: Any = None) -> dict[str, dict[str, Any]]:
+    if imported is not None and not refused:
+        # Imported results (separate test suite): status per the verification status rules, safe metadata only.
+        return {c: {"area": label, **area_fields(imported, c, findings)} for c, label in AUTH_CATEGORIES.items()}
     auth = cfg.authentication
     if refused:
         reason = "safety gate refused the target; nothing was sent"

@@ -23,6 +23,14 @@ CI gate                               security-ci gate         -> exit 0 pass / 
 - Authentication and Session remain **NOT VERIFIED** (Phase 3B is plumbing only) and Authorization / IDOR / BOLA /
   tenant isolation remains **NOT VERIFIED** (Phase 3C is status only); SARIF and the gate copy these statuses into
   run properties, they do not change them and never turn NOT VERIFIED into a finding.
+- **Imported verification results.** A Phase 3 report can carry results that a separate suite produced and Phase 3
+  validated (see the Phase 3 README).
+  - Their findings (`RT-AUTH/SESSION/AUTHZ/IDOR/TENANT-*`) are exported as ordinary runtime results with
+    `origin: imported-verification`, using the unchanged severity mapping.
+  - The Phase 3 run's properties add `verificationSubareas` and `importedVerification` (status, requestsCount).
+  - A PASS or EXECUTED without `runtime_checks_executed: true` is read as NOT VERIFIED.
+  - An invalid `requests_count` (not 0-20) or an INCOMPLETE import is INCOMPLETE and fails the gate unless
+    `--allow-incomplete` is given.
 - A clean SARIF report or a passing gate is **not** proof of security.
 - The ZAP baseline remains **passive** (`zap-baseline.py` only).
 
@@ -50,6 +58,7 @@ Without installing: `PYTHONPATH=src python -m security_ci.cli ...`.
 | Phase 3 | `RT-HEADERS/COOKIE/CORS/REDIRECT/TLS/ERROR-*`, `RT-AUTH-*`, `RT-SESSION-*` | `phase3-runtime-security` | `RT-<CATEGORY>/<title-slug>` |
 | ZAP baseline | `RT-ZAP-*` (source `OWASP ZAP`) | `phase3-runtime-security` | `zap/<ZAP alert id>` |
 | Authorization (reserved, imported only) | `RT-AUTHZ-*` | `phase3-runtime-security` | `RT-AUTHZ/<title-slug>`; keeps actor labels (A/B only), resource label, evidence count |
+| IDOR/BOLA, tenant isolation (reserved, none generated) | `RT-IDOR-*`, `RT-TENANT-*` | `phase3-runtime-security` | `RT-IDOR/<title-slug>`, `RT-TENANT/<title-slug>`; accepted if present, never synthesized |
 | AI review | `AI-*` | `ai-code-review` | `ai/<category>` |
 
 Each result keeps: finding ID (`properties.findingId`, `partialFingerprints`), title, description, severity,

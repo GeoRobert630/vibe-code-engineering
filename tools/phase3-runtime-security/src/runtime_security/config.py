@@ -95,6 +95,8 @@ class Config:
     source_path: str | None = None
     authentication: AuthConfig | None = None
     zap_baseline: "ZapBaselineConfig | None" = None
+    # Local JSON file with results produced by a separate, authorized test suite (never credentials).
+    verification_results: str | None = None
 
     @property
     def scheme(self) -> str:
@@ -118,6 +120,8 @@ _ALLOWED = {
     "credentials": {"username_env", "password_env"},
     # Passive OWASP ZAP baseline only (zap-baseline.py). No credentials, no active scan.
     "zap_baseline": {"enabled", "image", "spider_minutes", "timeout_seconds"},
+    # Imported Authentication/Session/Authorization results (a file path only; no credentials, no requests).
+    "verification_results": {"path"},
 }
 
 
@@ -241,6 +245,15 @@ def parse(data: Any, source_path: str | None = None) -> Config:
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 60 <= timeout <= 3600:
             raise ConfigError("zap_baseline.timeout_seconds must be an integer between 60 and 3600")
         cfg.zap_baseline = ZapBaselineConfig(enabled, image, minutes, timeout)
+
+    if "verification_results" in data:
+        vpath = data["verification_results"].get("path")
+        if not isinstance(vpath, str) or not vpath.strip() or not vpath.lower().endswith(".json"):
+            raise ConfigError("verification_results.path must be a path to a .json file")
+        p = Path(vpath)
+        if not p.is_absolute() and source_path:
+            p = Path(source_path).resolve().parent / p
+        cfg.verification_results = str(p)
 
     limits = data.get("limits", {})
     if "timeout" in limits:

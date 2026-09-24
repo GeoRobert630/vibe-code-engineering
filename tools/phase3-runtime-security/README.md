@@ -39,12 +39,33 @@ unauthenticated only - not proof of security. `zap-full-scan.py` / `zap-api-scan
 | Tenant isolation | NOT VERIFIED (3C status only) |
 
 The JSON report carries `auth_areas` (Authentication, Session) and `authorization` (status, reason, scope,
-`runtime_checks_executed: false`, `credentials_read: false`); the Markdown report has `## Authorization` and
-`## Authorization Findings`. `RT-AUTHZ-*` is reserved for future imported results; none are generated.
+`runtime_checks_executed: false`, `credentials_read: false`, and `subareas` `authorization`, `idor_bola`,
+`tenant_isolation`, each always NOT VERIFIED with no findings); the Markdown report has `## Authorization` (with a
+sub-area table) and `## Authorization Findings`. `RT-AUTHZ-*`, `RT-IDOR-*` and `RT-TENANT-*` are reserved for future
+results; none are generated. Readers treat a report without `subareas` as all three NOT VERIFIED.
 NOT VERIFIED is a coverage status, not a security verdict.
 
+**Imported verification results** (optional, `verification_results: {path: results.json}`). A separate, authorized
+test suite can supply Authentication, Session, Authorization, IDOR/BOLA and Tenant-isolation results as a JSON file
+([schema 1.0](schemas/verification-results.schema.json)).
+- **What this tool does.** It only reads and validates the file. It sends no request, never receives credentials and
+  reports `credentials_read: false`.
+- **Validation.**
+  - Credential-shaped field names are rejected; values are redacted.
+  - `requests_count` must be 0-20 per area, and 20 at most in total.
+  - Finding IDs must stay within each area's namespace (`RT-AUTH`, `RT-SESSION`, `RT-AUTHZ`, `RT-IDOR`, `RT-TENANT`).
+  - Ambiguous evidence becomes INCOMPLETE; a PASS needs executed checks, evidence and no findings.
+- **In the report.** Valid results fill `auth_areas`, `authorization` and its sub-areas, with statuses, request counts,
+  limitations and findings. A rejected file makes the configured areas INCOMPLETE (exit 3). Without the option,
+  nothing changes: `verification_import` is NOT CONFIGURED and every area stays NOT VERIFIED.
+- **More detail.** See section 17 of the design document.
+
 **Not covered yet:** authentication, authorization, IDOR/BOLA, tenant isolation, CSRF, rate limiting,
-file access, webhooks, business logic.
+file access, webhooks, business logic. A possible future design for bounded authentication, session, authorization,
+IDOR/BOLA and tenant-isolation verification is in
+[docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md](../../docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md). Runtime probing is not
+implemented; only the import of separately produced results (section 17) is. Without imported results these areas
+remain NOT VERIFIED.
 
 ## Install / run
 
@@ -95,7 +116,7 @@ Allowed: local target
 
 IDs `RT-<CATEGORY>-NNN` (`RT-HEADERS-001`, `RT-COOKIE-001`, `RT-CORS-001`, `RT-REDIRECT-001`, `RT-TLS-001`,
 `RT-ERROR-001`; optional ZAP baseline: `RT-ZAP-001`; reserved for Phase 3B: `RT-AUTH-*`, `RT-SESSION-*`; reserved for
-3C imported results: `RT-AUTHZ-*`). Fields: `id, category, severity, confidence, title, endpoint, expected, actual, evidence,
+3C imported results: `RT-AUTHZ-*`; reserved, none generated: `RT-IDOR-*`, `RT-TENANT-*`). Fields: `id, category, severity, confidence, title, endpoint, expected, actual, evidence,
 impact, recommendation, validation, status` plus `cwe, owasp, notes, source` and `blocking` in JSON.
 Severity/confidence/status vocabulary matches Phase 2.
 

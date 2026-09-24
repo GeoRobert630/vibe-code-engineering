@@ -26,8 +26,12 @@ SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL")
 ACTIVE = {"OPEN", "REQUIRES_REVIEW"}
 MAX_REPORT_BYTES = 50 * 1024 * 1024
 P2_ID = re.compile(r"^P2-[0-9a-f]{12}$")
-RT_ID = re.compile(r"^RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ)-\d{3}$")
+RT_ID = re.compile(r"^RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ|IDOR|TENANT)-\d{3}$")
 AI_ID = re.compile(r"^AI-[A-Za-z0-9_-]{1,40}$")
+# Status vocabulary of imported verification results; PASS/EXECUTED need runtime_checks_executed=true.
+VERIFICATION_STATUSES = ("NOT CONFIGURED", "READY", "EXECUTED", "PASS", "FAIL", "INCOMPLETE", "NOT VERIFIED")
+REQUEST_BUDGET = 20
+SUBAREAS = ("authorization", "idor_bola", "tenant_isolation")
 
 
 class InputError(ValueError):
@@ -70,6 +74,8 @@ class Bundle:
     findings: list[UnifiedFinding] = field(default_factory=list)
     duplicates: list[dict[str, str]] = field(default_factory=list)   # skipped results and why
     verification: dict[str, str] = field(default_factory=dict)        # e.g. {"Authentication": "NOT VERIFIED"}
+    verification_subareas: dict[str, str] = field(default_factory=dict)  # authorization / idor_bola / tenant_isolation
+    imported_verification: dict[str, Any] | None = None              # {"status", "requestsCount"} when reported
     incomplete: list[str] = field(default_factory=list)               # layers whose scan did not complete
     tools: dict[str, str] = field(default_factory=dict)               # layer -> tool name/version
     phase2_exit_code: int | None = None
@@ -164,6 +170,22 @@ def _authz_extra(f: dict) -> dict:
     return out
 
 
+def _valid_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= REQUEST_BUDGET
+
+
+def _coverage_status(block: dict, allowed: tuple[str, ...], unbacked: tuple[str, ...]) -> str:
+    """Status as reported, restricted to the vocabulary; unbacked claims become NOT VERIFIED, malformed imports INCOMPLETE."""
+    status = block.get("status")
+    if status not in allowed:
+        return "NOT VERIFIED"
+    if status in unbacked and block.get("runtime_checks_executed") is not True:
+        return "NOT VERIFIED"
+    if block.get("source") == "imported" and not _valid_count(block.get("requests_count", 0)):
+        return "INCOMPLETE"
+    return status
+
+
 def load_phase3(path: Path, bundle: Bundle) -> None:
     data = _load(path)
     if data.get("schema_version") != "1.0" or (data.get("tool") or {}).get("name") != "phase3-runtime-security":
@@ -181,12 +203,30 @@ def load_phase3(path: Path, bundle: Bundle) -> None:
         bundle.incomplete.append("zap-baseline")
     for key, label in (("authentication", "Authentication"), ("session", "Session")):
         area = (data.get("auth_areas") or {}).get(key) or {}
-        status = area.get("status")
-        bundle.verification[label] = status if status in ("PASS", "FAIL", "NOT VERIFIED", "NOT APPLICABLE") else "NOT VERIFIED"
+        area = area if isinstance(area, dict) else {}
+        bundle.verification[label] = _coverage_status(area, VERIFICATION_STATUSES + ("NOT APPLICABLE",), ("PASS", "EXECUTED"))
     az = data.get("authorization")
     if isinstance(az, dict):   # Phase 3C coverage status (absent in older reports: left out, not guessed)
-        st = az.get("status")
-        bundle.verification["Authorization"] = st if st in ("PASS", "FAIL", "NOT CONFIGURED", "NOT VERIFIED", "INCOMPLETE") else "NOT VERIFIED"
+        bundle.verification["Authorization"] = _coverage_status(az, VERIFICATION_STATUSES, ("PASS", "EXECUTED"))
+        subs = az.get("subareas") if isinstance(az.get("subareas"), dict) else {}
+        for key in SUBAREAS if subs else ():
+            b = subs.get(key)
+            bundle.verification_subareas[key] = (_coverage_status(b, VERIFICATION_STATUSES, ("PASS", "FAIL", "EXECUTED"))
+                                                 if isinstance(b, dict) else "NOT VERIFIED")
+    vi = data.get("verification_import")
+    if isinstance(vi, dict):   # imported results (separate test suite); absent in older reports
+        vstatus = vi.get("status") if vi.get("status") in VERIFICATION_STATUSES else "INCOMPLETE"
+        count = vi.get("requests_count", 0)
+        if not _valid_count(count):
+            vstatus, count = "INCOMPLETE", 0
+        bundle.imported_verification = {"status": vstatus, "requestsCount": count}
+        if vstatus == "INCOMPLETE":
+            bundle.incomplete.append("phase3 imported verification")
+    if not safety.get("allowed", False):   # refused target: nothing verified at runtime
+        for label in list(bundle.verification):
+            bundle.verification[label] = "NOT VERIFIED"
+        for key in list(bundle.verification_subareas):
+            bundle.verification_subareas[key] = "NOT VERIFIED"
     confirmed: dict[str, list[str]] = {}   # phase3a finding id -> zap alert ids that confirm it
     confirming_alerts: set[str] = set()
     for c in data.get("correlations") or []:
@@ -219,7 +259,8 @@ def load_phase3(path: Path, bundle: Bundle) -> None:
             blocking=f.get("blocking") is True, category=category, url=url, endpoint=endpoint,
             evidence=clean(f.get("evidence"), 300) or None, recommendation=clean(f.get("recommendation"), 600),
             cwe=_cwe(f.get("cwe")), zap_alert_id=zap_id, correlated_zap_alerts=sorted(set(confirmed.get(fid, []))),
-            extra=_authz_extra(f) if fid.startswith("RT-AUTHZ-") else {},
+            extra=(_authz_extra(f) if fid.startswith("RT-AUTHZ-") else {})
+            | ({"origin": "imported-verification"} if f.get("source") == "imported-verification" else {}),
         ))
 
 
