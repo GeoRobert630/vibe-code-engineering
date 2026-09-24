@@ -1,10 +1,10 @@
 # engineering-ci
 
-Orchestration only: one GitHub Actions workflow that runs the existing **Security CI** and **Quality CI** tools and
-produces one combined result. It adds no scanner, rule, finding, severity, gate or SARIF format of its own.
+Orchestration only: one GitHub Actions workflow that runs the existing **Security CI** and **Quality CI**
+(accessibility and performance) tools and produces one combined result. It adds no scanner, rule, finding, severity, gate or SARIF format of its own.
 
 ```
-Security CI + Quality CI
+Security CI + Quality CI (accessibility) + Quality CI (performance)
         ↓
   Engineering CI
 ```
@@ -18,34 +18,40 @@ Security CI  job "security"  phase2-scan -> runtime-security (only with RUNTIME_
 Quality CI   job "quality"   quality-ci a11y (only with a target) -> quality-ci sarif -> quality-ci gate
                                                                                    => quality-reports/
     ↓
+Performance  job "performance"  quality-ci-perf perf (only with a target) -> quality-ci-perf sarif -> quality-ci-perf gate
+                                                                                   => performance-reports/
+    ↓
 Collect reports              separate artifacts and separate SARIF categories
     ↓
-Combined result  job "engineering" (needs both, always runs) -> engineering-reports/engineering-summary.json
-                             fails when either gate fails (or a job never reached its gate)
+Combined result  job "engineering" (needs all three, always runs) -> engineering-reports/engineering-summary.json
+                             fails when any gate fails (or a job never reached its gate)
 ```
 
-Security and Quality run as independent jobs, so a failure in one never prevents the other from producing its report.
+Security, Accessibility and Performance run as independent jobs, so a failure in one never prevents the others from
+producing their reports. Each keeps its own gate policy and finding namespace (`P2-*`/`RT-*`/`AI-*`, `Q-A11Y-*`,
+`Q-PERF-*`); Engineering CI only reads each gate's exit code and `Outcome:` line.
 
 ## Pinned tooling
 
-Both jobs check out the public `GeoRobert630/vibe-code-engineering` at exact reviewed commits, never a branch, so a
+All three jobs check out the public `GeoRobert630/vibe-code-engineering` at exact reviewed commits, never a branch, so a
 toolkit change cannot alter a project's CI result (or run unreviewed code) until the SHAs are deliberately updated:
 
 | Job | Commit | Tag |
 |---|---|---|
 | security | `bd71c46f1584063254dfc0b668fcff2ba0ea26d0` | `security-baseline-v1` |
 | quality | `fa816aad46fb46f3dade2173b53da5d920177e21` | `quality-ci-v1.1` |
+| performance | `c6b82c0739f0342a3ac6b2952532e86343985e1f` | `quality-ci-v1.2` (hosted-calibrated `MIN_BENCHMARK`) |
 
 ## Configuration
 
 Only the non-secret repository variables already used by the Security CI and Quality CI examples:
 `RUNTIME_TARGET_URL`, `RUNTIME_ENVIRONMENT`, `RUNTIME_AUTHORIZED_BY`, `ENABLE_ZAP_BASELINE`, `SECURITY_GATE_POLICY`,
-`QUALITY_TARGET_URL`, `QUALITY_ENVIRONMENT`, `QUALITY_AUTHORIZED_BY`, `QUALITY_PAGES`, `QUALITY_GATE_POLICY`.
-No secrets, tokens, passwords or cookies. Permissions: `contents: read`, `actions: read`, `security-events: write`
+`QUALITY_TARGET_URL`, `QUALITY_ENVIRONMENT`, `QUALITY_AUTHORIZED_BY`, `QUALITY_PAGES`, `QUALITY_GATE_POLICY`,
+`PERF_PROFILE`, `PERF_GATE_POLICY` (the performance job measures the same `QUALITY_*` target/pages). No secrets, tokens, passwords or cookies. Permissions: `contents: read`, `actions: read`, `security-events: write`
 (SARIF upload) - the same as the existing workflows.
 
 As a reusable workflow (`workflow_call`) it accepts `project_path` (subdirectory to check), `quality_site_dir`
-(static directory served on 127.0.0.1 inside the job for the accessibility scan), `quality_pages`, `artifact_suffix`
+(static directory served on 127.0.0.1 inside the job for the accessibility and performance scans), `quality_pages`, `artifact_suffix`
 (unique artifact names / SARIF categories when called several times in one run) and `enforce` (default `true`;
 push, pull_request and workflow_dispatch runs always enforce).
 
@@ -54,10 +60,15 @@ push, pull_request and workflow_dispatch runs always enforce).
 | | Status values | Gate result |
 |---|---|---|
 | Security | `PASS`, `FAIL` (policy violation), `INCOMPLETE` (gate fails only because a scan was incomplete/refused, or could not be evaluated) | `PASS` / `FAIL` = `security-ci gate` exit code |
-| Quality | `PASS`, `FAIL`, `INCOMPLETE`, `NOT CONFIGURED` (the `Outcome:` of `quality-ci gate`) | `PASS` / `FAIL` = `quality-ci gate` exit code |
+| Quality (accessibility) | `PASS`, `FAIL`, `INCOMPLETE`, `NOT CONFIGURED` (the `Outcome:` of `quality-ci gate`) | `PASS` / `FAIL` = `quality-ci gate` exit code |
+| Performance | `PASS`, `FAIL`, `INCOMPLETE`, `NOT CONFIGURED` (the `Outcome:` of `quality-ci-perf gate`; policy `PERF_GATE_POLICY`, default `release`) | `PASS` / `FAIL` = `quality-ci-perf gate` exit code |
 
 A job that never reached its gate (tool error, cancellation) is `INCOMPLETE` with gate `FAIL`, never a pass.
-**overall** is `PASS` only when both gates pass.
+**overall** is `PASS` only when all three gates pass. `NOT CONFIGURED` keeps each tool's own gate semantics (the gate
+passes unless `--require-configured`), so an unconfigured quality target does not fail Engineering CI but is reported
+as `NOT CONFIGURED`, never as a pass of the check. The summary and step summary list
+`Security: …`, `Accessibility: …`, `Performance: …` and `Final enforcement: PASS|FAIL` (marked "not enforced" when
+`enforce: false`). The performance timing reliability (HIGH / LOW) is copied from the gate output.
 
 ## engineering-summary.json
 
@@ -70,8 +81,12 @@ A job that never reached its gate (tool error, cancellation) is `INCOMPLETE` wit
   "quality":  {"status": "PASS", "gate_result": "PASS", "gate_exit_code": 0, "job_result": "success",
                "artifact": "quality-reports", "report_path": "quality-reports/accessibility-report.json",
                "sarif_path": "quality-reports/accessibility.sarif"},
+  "performance": {"status": "PASS", "gate_result": "PASS", "gate_exit_code": 0, "job_result": "success",
+               "artifact": "performance-reports", "report_path": "performance-reports/performance-report.json",
+               "sarif_path": "performance-reports/performance.sarif", "timing_reliability": "HIGH"},
   "verification": {"authentication": "NOT VERIFIED", "session": "NOT VERIFIED", "authorization": "NOT VERIFIED"},
   "overall": "FAIL",
+  "enforced": true,
   "notice": "..."
 }
 ```
@@ -82,18 +97,21 @@ contains no findings; findings stay in each tool's own report and SARIF.
 
 ## What a combined PASS means
 
-- Security findings (`P2-*`, `RT-*`, `RT-ZAP-*`, `RT-AUTH-*`, `RT-SESSION-*`, `AI-*`) and Quality findings (`Q-A11Y-*`)
-  remain separate: separate reports, artifacts, SARIF files and SARIF categories.
+- Security findings (`P2-*`, `RT-*`, `RT-ZAP-*`, `RT-AUTH-*`, `RT-SESSION-*`, `AI-*`), accessibility findings
+  (`Q-A11Y-*`) and performance findings (`Q-PERF-*`) remain separate: separate reports, artifacts, SARIF files and
+  SARIF categories, each judged by its own gate policy.
 - A combined PASS does **not** mean all verification areas are complete. Authentication, Session and Authorization
   remain **NOT VERIFIED** unless independently verified; without `RUNTIME_TARGET_URL` Phase 3 does not run.
   NOT VERIFIED / NOT CONFIGURED are coverage statuses and are never turned into findings or into a runtime PASS.
 - The ZAP baseline remains optional and passive (`zap-baseline.py` only, image never pulled, no credentials).
-- A clean accessibility scan is not proof of full WCAG compliance.
+- A clean accessibility scan is not proof of full WCAG compliance; a passing performance gate is lab data, not proof
+  of real-user performance.
 
 ## Tests
 
 `python -m pytest tools/engineering-ci/tests` checks the workflow's policy (triggers, permissions, pins, no
-credentials, ZAP/browser settings, separate artifacts and SARIF categories) and executes the workflow's own
+credentials, ZAP/browser settings, separate artifacts and SARIF categories, unchanged security/accessibility job
+  definitions) and executes the workflow's own
 result-classification and combination scripts against stubbed gate results. The external repository
 `GeoRobert630/vibe-engineering-test` runs the unchanged workflow against four cases (clean, security failure,
 quality failure, both).

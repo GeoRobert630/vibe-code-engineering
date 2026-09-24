@@ -81,21 +81,23 @@ scan is not proof of complete accessibility or WCAG compliance.
 
 ## Engineering CI
 
-`tools/engineering-ci` provides one example workflow that runs both pipelines and produces one combined result.
+`tools/engineering-ci` provides one example workflow that runs Security CI, Quality CI accessibility and Quality CI
+performance and produces one combined result.
 It only orchestrates the existing tools; it adds no scanner, finding, severity, gate or SARIF format.
 
 ```
-Security CI + Quality CI
+Security CI + Quality CI (accessibility) + Quality CI (performance)
         ↓
   Engineering CI
 ```
 
-- The Security and Quality jobs run independently. Each uploads its own reports (`security-reports/`,
-  `quality-reports/`) and SARIF (separate categories). A final job writes `engineering-summary.json` and fails when
-  either gate fails.
-- Tooling is pinned to reviewed commits: security `bd71c46` (`security-baseline-v1`) and quality `fa816aa`
-  (`quality-ci-v1.1`).
-- Security findings and Quality findings remain separate; the summary repeats neither.
+- The Security, Accessibility and Performance jobs run independently. Each uploads its own reports
+  (`security-reports/`, `quality-reports/`, `performance-reports/`) and SARIF (separate categories). A final job writes
+  `engineering-summary.json` and fails when any gate fails.
+- Tooling is pinned to reviewed commits: security `bd71c46` (`security-baseline-v1`), accessibility `fa816aa`
+  (`quality-ci-v1.1`) and performance `c6b82c0` (`quality-ci-v1.2`).
+- Security, accessibility (`Q-A11Y-*`) and performance (`Q-PERF-*`) findings remain separate, each with its own gate
+  policy; the summary repeats none of them.
 - A combined PASS does not mean all verification areas are complete. Authentication, Session and Authorization
   remain NOT VERIFIED unless independently verified; without `RUNTIME_TARGET_URL` Phase 3 does not run.
 - ZAP remains optional and passive.
