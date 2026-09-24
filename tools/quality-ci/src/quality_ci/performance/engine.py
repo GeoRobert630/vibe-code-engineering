@@ -32,10 +32,11 @@ ENGINE_NAME = "chromium-performance-apis"
 
 # Host benchmark: fixed xorshift workload, unthrottled, median of 3; index = 100000 / median_ms.
 BENCHMARK_ITERATIONS = 5_000_000
-# timing_reliability is LOW below this index. PROVISIONAL (2026-09-24): set from local measurements only; must be
-# re-calibrated as 50% of the observed ubuntu-latest median before release (see README "Host benchmark").
-MIN_BENCHMARK = 1000
-MIN_BENCHMARK_CALIBRATION = "PROVISIONAL 2026-09-24 (local only; pending ubuntu-latest calibration)"
+# timing_reliability is LOW below this index. Calibrated 2026-09-24 as 50% of the observed ubuntu-latest median:
+# median 7142.9 over 30 hosted runs (GeoRobert630/vibe-performance-test, performance-acceptance run 35958994272,
+# tooling 67754e7) -> 7142.9 / 2 = 3571.45 -> 3571. Previous provisional value: 1000 (local only).
+MIN_BENCHMARK = 3571
+MIN_BENCHMARK_CALIBRATION = "2026-09-24: 50% of ubuntu-latest median 7142.9 (30 runs, vibe-performance-test run 35958994272)"
 
 NET_QUIET_S = 2.0
 TASK_QUIET_MS = 1000

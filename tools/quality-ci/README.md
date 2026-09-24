@@ -175,8 +175,10 @@ must match across runs (otherwise `nondeterministic`, maximum used).
 
 **Host benchmark.** A fixed xorshift workload (5,000,000 iterations, unthrottled, median of 3) gives
 `benchmark_index = 100000 / ms`. Below `MIN_BENCHMARK`, `timing_reliability` is LOW and timing FAILs are capped at WARN;
-deterministic checks are never capped. `MIN_BENCHMARK = 1000` is **provisional (2026-09-24, local measurements
-only)**; it must be re-calibrated to 50% of the observed ubuntu-latest median before release.
+deterministic checks are never capped. `MIN_BENCHMARK = 3571`, calibrated **2026-09-24** as 50% of the observed
+ubuntu-latest median: 7142.9 over 30 hosted runs (min 4878.0, max 14705.9) in `GeoRobert630/vibe-performance-test`
+(workflow `performance-acceptance`, run 35958994272, tooling `67754e7`); 7142.9 / 2 = 3571.45, rounded down to 3571.
+Replaces the provisional local-only value 1000. Re-calibrate the same way if the hosted runner class changes.
 
 **Severity.** FAIL -> HIGH (blocking); WARN -> MEDIUM; diagnostic -> LOW; NOT MEASURED / nondeterministic -> INFORMATIONAL
 (needs review). CRITICAL is never used. SARIF: driver `quality-ci-performance`, ruleId `perf/<check_id>`, no
