@@ -5,6 +5,8 @@
 #       -> Quality CI     (job "quality":     accessibility via quality-ci, JSON/Markdown/SARIF, quality gate)
 #       -> Performance CI (job "performance": lab performance via quality-ci-perf, JSON/Markdown/SARIF, performance gate)
 #       -> Collect reports (separate artifacts: security-reports/, quality-reports/, performance-reports/, engineering-reports/)
+#          SARIF is uploaded from a copy whose runs[].automationDetails.id is the upload category (one code-scanning
+#          category per gate and per artifact_suffix); the report artifacts keep the tools' original SARIF.
 #       -> Combined result (job "engineering": engineering-summary.json, fails when any of the three gates fails)
 #
 # Copy to .github/workflows/engineering-ci.yml in the project to check. Orchestration only: every scanner, gate,
@@ -232,11 +234,37 @@ jobs:
           path: security-reports/
           retention-days: 30
 
-      - name: Upload security SARIF
+      - name: Prepare security SARIF for upload (unique code-scanning category)
+        id: sarif_upload
         if: ${{ !cancelled() && steps.sarif.outputs.created == 'true' }}
+        env:
+          SARIF_IN: security-reports/security.sarif
+          SARIF_OUT: sarif-upload/security.sarif
+          SARIF_CATEGORY: vibe-code-engineering-security${{ env.SUFFIX }}
+        run: |
+          # The tool's SARIF carries its own runs[].automationDetails.id (e.g. vibe-code-engineering/phase2/), which
+          # upload-sarif never overwrites with its `category` input - so every upload of the same tool would share one
+          # code-scanning category and replace the previous one. Upload a copy whose runs all carry this upload's
+          # category instead; the original file stays unchanged in the report artifact.
+          python - <<'PY'
+          import json, os, pathlib
+          src, dst = pathlib.Path(os.environ["SARIF_IN"]), pathlib.Path(os.environ["SARIF_OUT"])
+          category = os.environ["SARIF_CATEGORY"]
+          automation_id = category if category.endswith("/") else category + "/"   # as upload-sarif derives it
+          doc = json.loads(src.read_text(encoding="utf-8"))
+          for run in doc.get("runs", []):
+              run.setdefault("automationDetails", {})["id"] = automation_id
+          dst.parent.mkdir(parents=True, exist_ok=True)
+          dst.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          print(f"{dst}: {len(doc.get('runs', []))} run(s) -> automationDetails.id {automation_id}")
+          PY
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload security SARIF
+        if: ${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: security-reports/security.sarif
+          sarif_file: sarif-upload/security.sarif
           category: vibe-code-engineering-security${{ env.SUFFIX }}
 
   quality:
@@ -363,11 +391,37 @@ jobs:
           path: quality-reports/
           retention-days: 30
 
-      - name: Upload quality SARIF
+      - name: Prepare quality SARIF for upload (unique code-scanning category)
+        id: sarif_upload
         if: ${{ !cancelled() && steps.sarif.outputs.created == 'true' }}
+        env:
+          SARIF_IN: quality-reports/accessibility.sarif
+          SARIF_OUT: sarif-upload/accessibility.sarif
+          SARIF_CATEGORY: vibe-code-engineering-quality-accessibility${{ env.SUFFIX }}
+        run: |
+          # The tool's SARIF carries its own runs[].automationDetails.id (e.g. vibe-code-engineering/phase2/), which
+          # upload-sarif never overwrites with its `category` input - so every upload of the same tool would share one
+          # code-scanning category and replace the previous one. Upload a copy whose runs all carry this upload's
+          # category instead; the original file stays unchanged in the report artifact.
+          python - <<'PY'
+          import json, os, pathlib
+          src, dst = pathlib.Path(os.environ["SARIF_IN"]), pathlib.Path(os.environ["SARIF_OUT"])
+          category = os.environ["SARIF_CATEGORY"]
+          automation_id = category if category.endswith("/") else category + "/"   # as upload-sarif derives it
+          doc = json.loads(src.read_text(encoding="utf-8"))
+          for run in doc.get("runs", []):
+              run.setdefault("automationDetails", {})["id"] = automation_id
+          dst.parent.mkdir(parents=True, exist_ok=True)
+          dst.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          print(f"{dst}: {len(doc.get('runs', []))} run(s) -> automationDetails.id {automation_id}")
+          PY
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload quality SARIF
+        if: ${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: quality-reports/accessibility.sarif
+          sarif_file: sarif-upload/accessibility.sarif
           category: vibe-code-engineering-quality-accessibility${{ env.SUFFIX }}
 
   performance:
@@ -499,11 +553,37 @@ jobs:
           path: performance-reports/
           retention-days: 30
 
-      - name: Upload performance SARIF
+      - name: Prepare performance SARIF for upload (unique code-scanning category)
+        id: sarif_upload
         if: ${{ !cancelled() && steps.sarif.outputs.created == 'true' }}
+        env:
+          SARIF_IN: performance-reports/performance.sarif
+          SARIF_OUT: sarif-upload/performance.sarif
+          SARIF_CATEGORY: vibe-code-engineering-quality-performance${{ env.SUFFIX }}
+        run: |
+          # The tool's SARIF carries its own runs[].automationDetails.id (e.g. vibe-code-engineering/phase2/), which
+          # upload-sarif never overwrites with its `category` input - so every upload of the same tool would share one
+          # code-scanning category and replace the previous one. Upload a copy whose runs all carry this upload's
+          # category instead; the original file stays unchanged in the report artifact.
+          python - <<'PY'
+          import json, os, pathlib
+          src, dst = pathlib.Path(os.environ["SARIF_IN"]), pathlib.Path(os.environ["SARIF_OUT"])
+          category = os.environ["SARIF_CATEGORY"]
+          automation_id = category if category.endswith("/") else category + "/"   # as upload-sarif derives it
+          doc = json.loads(src.read_text(encoding="utf-8"))
+          for run in doc.get("runs", []):
+              run.setdefault("automationDetails", {})["id"] = automation_id
+          dst.parent.mkdir(parents=True, exist_ok=True)
+          dst.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          print(f"{dst}: {len(doc.get('runs', []))} run(s) -> automationDetails.id {automation_id}")
+          PY
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload performance SARIF
+        if: ${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: performance-reports/performance.sarif
+          sarif_file: sarif-upload/performance.sarif
           category: vibe-code-engineering-quality-performance${{ env.SUFFIX }}
 
   engineering:

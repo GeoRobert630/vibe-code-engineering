@@ -95,6 +95,33 @@ as `NOT CONFIGURED`, never as a pass of the check. The summary and step summary 
 `NOT RUN` (no `RUNTIME_TARGET_URL`), `INCOMPLETE` (runtime-security refused/incomplete) or `EXECUTED`. The summary
 contains no findings; findings stay in each tool's own report and SARIF.
 
+## SARIF upload categories
+
+Each tool stamps its SARIF with a fixed `runs[].automationDetails.id` (`vibe-code-engineering/phase2/`,
+`vibe-code-engineering/phase3/`, `vibe-code-engineering/quality/accessibility/`,
+`vibe-code-engineering/quality/performance/`). GitHub's `upload-sarif` keeps an existing `automationDetails.id` and
+does not replace it with its `category` input, so without further handling every upload of the same tool for the same
+commit (for example several `artifact_suffix` cases) would share one code-scanning category and replace the previous
+analysis.
+
+The workflow therefore uploads a **GitHub-upload-specific copy**: right before each upload, the step
+"Prepare … SARIF for upload" writes `sarif-upload/<file>.sarif` with every run's `automationDetails.id` set to that
+upload's category plus a trailing `/` (the same form `upload-sarif` derives from `category`). Nothing else in the file
+changes - results, finding IDs (`P2-*`/`RT-*`/`AI-*`, `Q-A11Y-*`, `Q-PERF-*`), rules and properties are identical, and
+the quality SARIF still has no `security-severity`. The report artifacts (`security-reports/`, `quality-reports/`,
+`performance-reports/`) keep the tools' original SARIF unchanged. If the SARIF was not created, the copy is not made
+and the upload is skipped.
+
+| Gate | Uploaded file | Category / `automationDetails.id` |
+|---|---|---|
+| Security | `sarif-upload/security.sarif` | `vibe-code-engineering-security<artifact_suffix>` / `…<artifact_suffix>/` |
+| Accessibility | `sarif-upload/accessibility.sarif` | `vibe-code-engineering-quality-accessibility<artifact_suffix>` / `…<artifact_suffix>/` |
+| Performance | `sarif-upload/performance.sarif` | `vibe-code-engineering-quality-performance<artifact_suffix>` / `…<artifact_suffix>/` |
+
+The category is stable for the same gate and suffix and differs between gates and between suffixes, so each analysis
+of a commit keeps its own code-scanning category. Use a distinct `artifact_suffix` for every call of the reusable
+workflow within one run.
+
 ## What a combined PASS means
 
 - Security findings (`P2-*`, `RT-*`, `RT-ZAP-*`, `RT-AUTH-*`, `RT-SESSION-*`, `AI-*`), accessibility findings
@@ -119,5 +146,5 @@ External validation of the three-gate workflow uses `GeoRobert630/vibe-engineeri
 copy of this workflow per case directory and asserts the combined result. The three-gate cases are: all gates PASS;
 security failure; accessibility failure; performance failure (the intentionally slow Quality CI performance fixture);
 and security + accessibility + performance failure. In every case Authentication, Session and Authorization must stay
-NOT VERIFIED. That repository's workflow copy must be updated to this three-gate version before its results apply;
-until then it validates the earlier two-gate (security + accessibility) workflow only.
+NOT VERIFIED. Its workflow copy is this three-gate version at `62461a6` (`engineering-ci-v1.1`), checked byte-for-byte
+against the toolkit by the acceptance run.

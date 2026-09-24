@@ -132,12 +132,12 @@ def test_reports_and_sarif_kept_separate(wf):
     assert len({sec["name"], qual["name"], eng["name"]}) == 3
     s = step(wf, "security", "Upload security SARIF")["with"]
     q = step(wf, "quality", "Upload quality SARIF")["with"]
-    assert s["sarif_file"] == "security-reports/security.sarif" and q["sarif_file"] == "quality-reports/accessibility.sarif"
+    assert s["sarif_file"] == "sarif-upload/security.sarif" and q["sarif_file"] == "sarif-upload/accessibility.sarif"
     assert s["category"].startswith("vibe-code-engineering-security") and q["category"].startswith("vibe-code-engineering-quality-accessibility")
     for job in ("security", "quality"):
         up = step(wf, job, f"Upload {job} SARIF")
         assert up["uses"] == "github/codeql-action/upload-sarif@v4"
-        assert up["if"] == "${{ !cancelled() && steps.sarif.outputs.created == 'true' }}"
+        assert up["if"] == "${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}"
 
 
 def test_combined_job_depends_on_all_three_and_always_runs(wf):
@@ -307,24 +307,33 @@ def test_quality_gate_classification(wf, tmp_path, outcome, code, status, gate):
 
 # ------------------------------------------------------------------ performance integration (third independent gate)
 
-SECURITY_JOB_SHA256 = "f84c6514e341dcc6a35f4e6e334c03f3b5ee97f1e003dc6a0ae9fb32583b691f"   # engineering-ci-v1 (752c3bd)
-QUALITY_JOB_SHA256 = "37ab8fac72c4427acab92601c04e9021b8ff3ad662e11b5f42f2802531f6e2fd"    # engineering-ci-v1 (752c3bd)
+# Fingerprints of each job WITHOUT its SARIF upload boundary (the "Prepare ... SARIF for upload" and "Upload ... SARIF"
+# steps): security / quality as released in engineering-ci-v1 (752c3bd), performance and engineering as released in
+# engineering-ci-v1.1 (62461a6). Everything that scans, gates, reports or enforces is byte-for-byte the release.
+SECURITY_JOB_SHA256 = "98479ef2f76b50e83ba17e20e8895deefb1b9e74ca6d39a11a05eb523c6721b7"
+QUALITY_JOB_SHA256 = "b84208bbd8f2dd460b6b0e15d48bebf26ae08800675dfd00b7d32eeca730dfcf"
+PERFORMANCE_JOB_SHA256 = "af0b112cea4a5191c91adf97ed6fcb5a9181f98f18b8655b84daad08f00c4d29"
+ENGINEERING_JOB_SHA256 = "8d076a2a3e948d7c78f38cfce8ca8f954c3de6ad439bc1780e322214926c4950"
 
 
-def _fingerprint(job_def: dict) -> str:
+def _fingerprint(job_def: dict, without: tuple = ()) -> str:
     import hashlib
 
-    return hashlib.sha256(json.dumps(job_def, sort_keys=True).encode()).hexdigest()
+    j = dict(job_def)
+    j["steps"] = [s for s in job_def["steps"] if not any(s.get("name", "").startswith(w) for w in without)]
+    return hashlib.sha256(json.dumps(j, sort_keys=True).encode()).hexdigest()
 
 
 def perf(status, gate, code, result="success", reliability="HIGH"):
     return {**job("PERFORMANCE", status, gate, code, result), "PERFORMANCE_RELIABILITY": reliability}
 
 
-def test_existing_security_and_accessibility_jobs_byte_for_byte_unchanged(wf):
-    # the security and accessibility jobs are exactly the engineering-ci-v1 definitions (steps, env, pins, outputs)
-    assert _fingerprint(wf["jobs"]["security"]) == SECURITY_JOB_SHA256
-    assert _fingerprint(wf["jobs"]["quality"]) == QUALITY_JOB_SHA256
+def test_existing_jobs_unchanged_apart_from_sarif_upload_boundary(wf):
+    # scanning, gating, reporting and enforcement are exactly the released definitions (steps, env, pins, outputs)
+    for job, sha in (("security", SECURITY_JOB_SHA256), ("quality", QUALITY_JOB_SHA256),
+                     ("performance", PERFORMANCE_JOB_SHA256)):
+        assert _fingerprint(wf["jobs"][job], (f"Prepare {job} SARIF", f"Upload {job} SARIF")) == sha, job
+    assert _fingerprint(wf["jobs"]["engineering"]) == ENGINEERING_JOB_SHA256
 
 
 def test_performance_job_reuses_existing_tool_and_gate(wf, text):
@@ -345,12 +354,11 @@ def test_three_separate_sarif_outputs_and_categories(wf):
     uploads = {j: step(wf, j, f"Upload {j} SARIF")["with"] for j in ("security", "quality", "performance")}
     files = {w["sarif_file"] for w in uploads.values()}
     cats = [w["category"] for w in uploads.values()]
-    assert files == {"security-reports/security.sarif", "quality-reports/accessibility.sarif",
-                     "performance-reports/performance.sarif"}
+    assert files == {"sarif-upload/security.sarif", "sarif-upload/accessibility.sarif", "sarif-upload/performance.sarif"}
     assert cats[2] == "vibe-code-engineering-quality-performance${{ env.SUFFIX }}" and len(set(cats)) == 3
     up = step(wf, "performance", "Upload performance SARIF")
     assert up["uses"] == "github/codeql-action/upload-sarif@v4"
-    assert up["if"] == "${{ !cancelled() && steps.sarif.outputs.created == 'true' }}"
+    assert up["if"] == "${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}"
     rep = step(wf, "performance", "Upload performance reports")
     assert rep["with"]["path"] == "performance-reports/" and rep["if"] == "always()"
     names = {step(wf, j, f"Upload {n} reports")["with"]["name"] for j, n in
@@ -496,3 +504,161 @@ def test_other_git_bash_on_path_accepted_and_non_windows_unchanged():
 
 def test_selected_bash_on_this_machine_is_not_a_wsl_launcher():
     assert BASH is None or not _is_wsl_launcher(BASH)
+
+
+# ------------------------------------------------------------------ SARIF upload boundary (unique code-scanning categories)
+
+TOOLS = ROOT.parent
+GATES = {  # job: (prepare step, original SARIF, upload copy, category base)
+    "security": ("Prepare security SARIF for upload (unique code-scanning category)", "security-reports/security.sarif",
+                 "sarif-upload/security.sarif", "vibe-code-engineering-security"),
+    "quality": ("Prepare quality SARIF for upload (unique code-scanning category)", "quality-reports/accessibility.sarif",
+                "sarif-upload/accessibility.sarif", "vibe-code-engineering-quality-accessibility"),
+    "performance": ("Prepare performance SARIF for upload (unique code-scanning category)",
+                    "performance-reports/performance.sarif", "sarif-upload/performance.sarif",
+                    "vibe-code-engineering-quality-performance"),
+}
+TOOL_AUTOMATION_IDS = {"security": {"vibe-code-engineering/phase2/", "vibe-code-engineering/phase3/"},
+                       "quality": {"vibe-code-engineering/quality/accessibility/"},
+                       "performance": {"vibe-code-engineering/quality/performance/"}}
+NAMESPACES = {"security": ("P2-", "RT-", "AI-"), "quality": ("Q-A11Y-",), "performance": ("Q-PERF-",)}
+
+
+def _tool_sarif(gate: str) -> dict:
+    """SARIF produced by the real, unmodified tool code (read-only import of the toolkit sources)."""
+    if gate == "security":
+        sys.path.insert(0, str(TOOLS / "security-ci" / "src"))
+        from security_ci.inputs import load_all
+        from security_ci.sarif import build
+
+        fx = TOOLS / "security-ci" / "tests" / "fixtures"
+        return build(load_all(fx / "phase2-report.json", fx / "phase3-report.json", None))
+    sys.path.insert(0, str(TOOLS / "quality-ci" / "src"))
+    page = {"url": "http://127.0.0.1:8000/", "occurrences": 1, "selectors": ["img"], "value": 3217, "runs": [3217],
+            "status": "FAIL", "contributors": [], "unstable": False, "capped_by_host": False}
+    if gate == "quality":
+        from quality_ci.sarif import build as a11y_build
+
+        return a11y_build({"run": {"status": "COMPLETE", "verdict": "FAIL"}, "findings": [{
+            "id": "Q-A11Y-0123456789", "kind": "violation", "rule_id": "image-alt", "title": "Images must have alt text",
+            "description": "d", "impact": "critical", "severity": "CRITICAL", "status": "OPEN", "blocking": True,
+            "source": "axe-core 4.10.3", "help": "h", "help_url": "", "wcag": ["wcag2a"], "occurrence_count": 1,
+            "pages": [page]}]})
+    from quality_ci.performance.sarif import build as perf_build
+
+    return perf_build({"run": {"status": "COMPLETE", "verdict": "FAIL"}, "host": {"timing_reliability": "HIGH"},
+                       "engine": {"web_vitals": {"version": "6.2.2"}}, "findings": [{
+                           "id": "Q-PERF-0123456789", "check_id": "budget.dom-nodes", "kind": "budget", "title": "DOM too large",
+                           "help": "h", "severity": "HIGH", "status": "OPEN", "blocking": True, "unit": "count",
+                           "threshold": {"warn": 1500, "fail": 3000}, "source": "quality-ci performance 0.1.0",
+                           "notes": [], "pages": [page]}]})
+
+
+def _ids(doc: dict) -> list[str]:
+    return [r["properties"]["findingId"] for run in doc["runs"] for r in run["results"]]
+
+
+def _without_automation(doc: dict) -> dict:
+    d = json.loads(json.dumps(doc))
+    for run in d["runs"]:
+        run.pop("automationDetails", None)
+    return d
+
+
+def run_prepare(wf, tmp_path: Path, gate: str, suffix: str, original: dict | None = None):
+    """Execute the workflow's exact 'Prepare ... SARIF for upload' step (bash + python), as GitHub would."""
+    name, src, dst, base = GATES[gate]
+    st = step(wf, gate, name)
+    work = tmp_path / f"{gate}{suffix or '-none'}"
+    (work / src).parent.mkdir(parents=True, exist_ok=True)
+    if original is not None:
+        (work / src).write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
+    out = work / "gh_output"
+    out.write_text("")
+    env = dict(os.environ, GITHUB_OUTPUT=str(out), MSYS2_ENV_CONV_EXCL="*")
+    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]      # `python` as setup-python provides
+    for k, v in st["env"].items():
+        env[k] = v.replace("${{ env.SUFFIX }}", suffix)
+    res = subprocess.run([BASH, "-e", "-c", st["run"]], cwd=work, env=env, capture_output=True, text=True)
+    return res, work, out.read_text()
+
+
+@pytest.mark.parametrize("gate", list(GATES))
+def test_tool_automation_ids_are_fixed_so_uploads_would_collide(gate):
+    # The released tools stamp a fixed runs[].automationDetails.id; upload-sarif keeps an existing id and ignores its
+    # `category` input, so every case of the same gate would land in ONE code-scanning category (the reported bug).
+    a, b = _tool_sarif(gate), _tool_sarif(gate)
+    ids_a = {run.get("automationDetails", {}).get("id") for run in a["runs"]}
+    assert ids_a <= TOOL_AUTOMATION_IDS[gate] and ids_a
+    assert ids_a == {run.get("automationDetails", {}).get("id") for run in b["runs"]}     # identical for every case
+
+
+@pytest.mark.skipif(BASH is None, reason="bash not available")
+@pytest.mark.parametrize("gate", list(GATES))
+@pytest.mark.parametrize("suffix", ["", "-clean", "-slow"])
+def test_prepare_step_rewrites_only_the_upload_copy(wf, tmp_path, gate, suffix):
+    import hashlib
+
+    original = _tool_sarif(gate)
+    res, work, gh_out = run_prepare(wf, tmp_path, gate, suffix, original)
+    assert res.returncode == 0, res.stderr
+    assert "ready=true" in gh_out
+    _, src, dst, base = GATES[gate]
+    before = (work / src).read_bytes()
+    copy = json.loads((work / dst).read_text(encoding="utf-8"))
+    expected_id = f"{base}{suffix}/"
+    assert {run["automationDetails"]["id"] for run in copy["runs"]} == {expected_id}   # every run rewritten
+    assert len(copy["runs"]) == len(original["runs"])
+    assert _without_automation(copy) == _without_automation(original)                  # nothing else changed
+    assert hashlib.sha256((work / src).read_bytes()).digest() == hashlib.sha256(before).digest()
+    assert json.loads((work / src).read_text(encoding="utf-8")) == original             # original SARIF untouched
+    assert {run.get("automationDetails", {}).get("id") for run in original["runs"]} <= TOOL_AUTOMATION_IDS[gate]
+    ids = _ids(copy)
+    assert ids == _ids(original) and all(i.startswith(NAMESPACES[gate]) for i in ids)   # namespaces unchanged
+    if gate != "security":
+        assert "security-severity" not in json.dumps(copy)                             # quality stays non-security
+
+
+@pytest.mark.skipif(BASH is None, reason="bash not available")
+def test_categories_distinct_across_gates_and_cases_and_stable(wf, tmp_path):
+    suffixes = ["-clean", "-vulnerable", "-inaccessible", "-slow", "-all-fail", "-clean-enforced", ""]
+    seen = {}
+    for gate in GATES:
+        original = _tool_sarif(gate)
+        for sfx in suffixes:
+            res, work, _ = run_prepare(wf, tmp_path, gate, sfx, original)
+            assert res.returncode == 0, res.stderr
+            doc = json.loads((work / GATES[gate][2]).read_text(encoding="utf-8"))
+            (auto_id,) = {run["automationDetails"]["id"] for run in doc["runs"]}
+            seen[(gate, sfx)] = auto_id
+            # the upload step's `category` input is the same value (without the trailing slash)
+            assert step(wf, gate, f"Upload {gate} SARIF")["with"]["category"].replace("${{ env.SUFFIX }}", sfx) + "/" == auto_id
+    assert len(set(seen.values())) == len(seen) == 3 * len(suffixes)                  # all analyses distinct
+    for gate in GATES:                                                                 # stable: same input, same id
+        res, work, _ = run_prepare(wf, tmp_path / "again", gate, "-clean", _tool_sarif(gate))
+        doc = json.loads((work / GATES[gate][2]).read_text(encoding="utf-8"))
+        assert {run["automationDetails"]["id"] for run in doc["runs"]} == {seen[(gate, "-clean")]}
+
+
+@pytest.mark.skipif(BASH is None, reason="bash not available")
+def test_prepare_step_fails_closed_without_sarif(wf, tmp_path):
+    res, work, gh_out = run_prepare(wf, tmp_path, "performance", "-x", original=None)
+    assert res.returncode != 0 and "ready=true" not in gh_out                           # upload then skipped
+    assert not (work / GATES["performance"][2]).exists()
+
+
+def test_upload_boundary_wiring(wf):
+    for gate, (prep_name, src, dst, base) in GATES.items():
+        steps = [s.get("name", "") for s in wf["jobs"][gate]["steps"]]
+        prep, up = step(wf, gate, prep_name), step(wf, gate, f"Upload {gate} SARIF")
+        assert prep["id"] == "sarif_upload" and prep["if"] == "${{ !cancelled() && steps.sarif.outputs.created == 'true' }}"
+        assert prep["env"] == {"SARIF_IN": src, "SARIF_OUT": dst, "SARIF_CATEGORY": base + "${{ env.SUFFIX }}"}
+        assert up["with"] == {"sarif_file": dst, "category": base + "${{ env.SUFFIX }}"}
+        assert up["if"] == "${{ !cancelled() && steps.sarif_upload.outputs.ready == 'true' }}"
+        assert steps.index(prep_name) == steps.index(f"Upload {gate} SARIF") - 1         # prepared right before upload
+        gate_step = {"security": "Security gate", "quality": "Quality gate", "performance": "Performance gate"}[gate]
+        assert steps.index(gate_step) < steps.index(prep_name)                            # gate result recorded first
+        reports = next(s for s in wf["jobs"][gate]["steps"] if s.get("name", "").startswith("Upload") and
+                       s.get("name", "").endswith("reports"))
+        assert not dst.startswith(reports["with"]["path"])                                # artifact keeps the original
+        assert src.startswith(reports["with"]["path"])
