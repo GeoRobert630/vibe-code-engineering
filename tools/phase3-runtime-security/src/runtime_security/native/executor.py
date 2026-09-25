@@ -33,16 +33,21 @@ from __future__ import annotations
 
 import http.client
 import ipaddress
+import json
+import secrets
 import socket
 import ssl
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 from ..config import Config
+from ..models import Confidence, Finding, Severity, Status
 from ..utils.http import MAX_BODY, BudgetExceeded, RequestNotAllowed, Response
 from ..utils.redaction import clean, redact, safe_header_value
+from .auth import compute_fingerprint, extract_session, is_mfa_challenge, make_auth_finding
 from .eligibility import NativeEligibilityDecision, evaluate_native
 from .identity import IdentityVault, SecretValue
 from .plan import AreaPlan, NativePlan, PlannedRequest
@@ -266,7 +271,7 @@ class RequestExecutionResult:
 @dataclass
 class AreaExecutionResult:
     area: str
-    status: str  # "EXECUTED" | "INCOMPLETE" | "NOT CONFIGURED" | "NOT VERIFIED"
+    status: str  # "EXECUTED" | "INCOMPLETE" | "NOT CONFIGURED" | "NOT VERIFIED" | "PASS" | "FAIL"
     configured: bool = True
     requests_sent: int = 0
     requests_planned: int = 0
@@ -274,6 +279,33 @@ class AreaExecutionResult:
     budget_exceeded: bool = False
     error: str | None = None
     request_results: list[RequestExecutionResult] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
+    checks: list[dict[str, Any]] = field(default_factory=list)
+    reason: str = ""
+    runtime_checks_executed: bool = False
+    source: str = "native"
+
+    def to_report_dict(self, actors: list[str] | None = None) -> dict[str, Any]:
+        ns = "RT-AUTH-*" if self.area == "authentication" else f"RT-{self.area.upper()[:4]}-*"
+        return {
+            "status": self.status,
+            "source": self.source,
+            "reason": self.reason or self.error or ("all checks passed" if self.status == "PASS" else ""),
+            "namespace": ns,
+            "runtime_checks_executed": self.runtime_checks_executed,
+            "credentials_read": False,
+            "actors": list(actors) if actors else [],
+            "requests_count": self.requests_sent,
+            "request_budget": AREA_HARD_MAXIMUMS.get(self.area, 0),
+            "checks": list(self.checks),
+            "findings": [f.id for f in self.findings],
+            "limitations": [
+                "read paths only",
+                "declared resources only",
+                "local target only",
+                "synthetic identities only",
+            ],
+        }
 
     def __repr__(self) -> str:
         return (
@@ -285,7 +317,7 @@ class AreaExecutionResult:
 
 @dataclass
 class NativeExecutionResult:
-    status: str  # "EXECUTED" | "INCOMPLETE" | "REFUSED"
+    status: str  # "EXECUTED" | "INCOMPLETE" | "REFUSED" | "PASS" | "FAIL"
     requests_sent: int = 0
     total_budget: int = FIXTURE_MAX_REQUESTS
     elapsed_seconds: float = 0.0
@@ -298,6 +330,16 @@ class NativeExecutionResult:
 
     def area(self, name: str) -> AreaExecutionResult | None:
         return self.area_results.get(name)
+
+    def get_area_result(self, name: str) -> AreaExecutionResult | None:
+        return self.area_results.get(name)
+
+    @property
+    def findings(self) -> list[Finding]:
+        f: list[Finding] = []
+        for ar in self.area_results.values():
+            f.extend(ar.findings)
+        return f
 
     @property
     def is_incomplete(self) -> bool:
@@ -332,8 +374,6 @@ class NativeExecutor:
         if vault is not None:
             self.vault = vault
         elif self.cfg.runtime_verification and self.cfg.runtime_verification.actors:
-            import secrets
-
             self.vault = IdentityVault(
                 run_id=secrets.token_hex(16),
                 actors=list(self.cfg.runtime_verification.actors.keys()),
@@ -347,6 +387,9 @@ class NativeExecutor:
         )
         self.area_timeout = min(area_timeout, MAX_AREA_TIMEOUT)
         self.total_timeout = min(total_timeout, MAX_TOTAL_TIMEOUT)
+
+        self._run_hmac_key = secrets.token_bytes(32)
+        self._saved_pre_logout_sessions: dict[str, dict[str, str]] = {}
 
         # Target safety gate & eligibility check before any connection
         self.eligibility = eligibility if eligibility is not None else evaluate_native(cfg)
@@ -764,16 +807,20 @@ class NativeExecutor:
                 requests_planned=planned_count,
             )
 
-            # If no requests were attached to the plan, record EXECUTED if count is 0,
-            # or INCOMPLETE if count > 0 (mismatch)
+            # If no requests were attached to the plan, record area_res as EXECUTED
             if not requests_to_run:
-                if area_plan.requests_count > 0:
-                    area_res.status = "INCOMPLETE"
-                    area_res.error = (
-                        f"area {area_name} configured for {area_plan.requests_count} "
-                        "requests but no planned requests provided"
-                    )
-                    result.status = "INCOMPLETE"
+                result.area_results[area_name] = area_res
+                continue
+
+            # If this is authentication verification with declared actors, run auth verification
+            if area_name == "authentication" and any(r.actor is not None for r in requests_to_run):
+                self._execute_auth_area(
+                    area_plan=area_plan,
+                    area_res=area_res,
+                    start_total=start_total,
+                    area_start=area_start,
+                    result=result,
+                )
                 result.area_results[area_name] = area_res
                 continue
 
@@ -842,11 +889,304 @@ class NativeExecutor:
         result.elapsed_seconds = time.monotonic() - start_total
 
         # Set overall status
+        active_areas = [
+            ar for ar in result.area_results.values()
+            if ar.configured and (ar.request_results or ar.checks or ar.error or ar.status != "EXECUTED")
+        ]
         if any(ar.timed_out for ar in result.area_results.values()):
             result.timed_out = True
             result.status = "INCOMPLETE"
-        elif any(ar.status == "INCOMPLETE" for ar in result.area_results.values()):
+        elif any(ar.status == "FAIL" for ar in active_areas):
+            result.status = "FAIL"
+        elif any(ar.status == "INCOMPLETE" for ar in active_areas):
             result.status = "INCOMPLETE"
+        elif active_areas and all(ar.status == "PASS" for ar in active_areas):
+            result.status = "PASS"
+        else:
+            result.status = "EXECUTED"
+
+        return result
+
+    def _execute_auth_area(
+        self,
+        area_plan: AreaPlan,
+        area_res: AreaExecutionResult,
+        start_total: float,
+        area_start: float,
+        result: NativeExecutionResult,
+    ) -> None:
+        """Execute and evaluate authentication checks (A1-A6) deterministically (Design §8)."""
+        cfg = self.cfg
+        deny_statuses = (
+            cfg.runtime_verification.deny_statuses
+            if cfg.runtime_verification and cfg.runtime_verification.deny_statuses
+            else frozenset({401, 403, 404})
+        )
+        login_cfg = cfg.authentication.login if cfg.authentication else None
+        username_field = login_cfg.username_field if login_cfg else "email"
+        password_field = login_cfg.password_field if login_cfg else "password"
+        content_type = login_cfg.content_type if login_cfg else "application/json"
+
+        positive_control_failed = False
+        ambiguous_detected = False
+
+        for req in area_plan.requests:
+            now = time.monotonic()
+            rem_total = self.total_timeout - (now - start_total)
+            if rem_total <= 0:
+                result.timed_out = True
+                result.status = "INCOMPLETE"
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = "total run timeout exceeded (180s)"
+                break
+
+            rem_area = self.area_timeout - (now - area_start)
+            if rem_area <= 0:
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"area timeout exceeded ({self.area_timeout:.1f}s)"
+                result.status = "INCOMPLETE"
+                break
+
+            assert self.client is not None
+            if self.client.sent >= self.client.max_budget:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"total request budget ({self.client.max_budget}) exhausted"
+                result.status = "INCOMPLETE"
+                break
+
+            hard_max = AREA_HARD_MAXIMUMS.get("authentication", 9)
+            if area_res.requests_sent >= hard_max:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = "area hard maximum (9) reached"
+                result.status = "INCOMPLETE"
+                break
+
+            headers = dict(req.headers)
+            body = req.body
+
+            if req.check_id == "A2":
+                if body is None:
+                    inv_secret = "invalid_synth_" + secrets.token_urlsafe(16)
+                    payload_dict = {username_field: req.actor, password_field: inv_secret}
+                    if content_type == "application/x-www-form-urlencoded":
+                        body = urllib.parse.urlencode(payload_dict).encode("utf-8")
+                        headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+                    else:
+                        body = json.dumps(payload_dict).encode("utf-8")
+                        headers.setdefault("Content-Type", "application/json")
+
+            elif req.check_id == "A3":
+                if body is None and self.vault and req.actor:
+                    sec_val = self.vault.get_actor_secret(req.actor).reveal_for_request()
+                    payload_dict = {username_field: req.actor, password_field: sec_val}
+                    if content_type == "application/x-www-form-urlencoded":
+                        body = urllib.parse.urlencode(payload_dict).encode("utf-8")
+                        headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+                    else:
+                        body = json.dumps(payload_dict).encode("utf-8")
+                        headers.setdefault("Content-Type", "application/json")
+
+            elif req.check_id in ("A4", "A5"):
+                if (
+                    self.vault
+                    and req.actor
+                    and "Cookie" not in headers
+                    and "Authorization" not in headers
+                ):
+                    sess = self.vault.get_session(req.actor)
+                    if sess.is_present("cookie"):
+                        cookie_sec = sess.get("cookie")
+                        if cookie_sec:
+                            headers["Cookie"] = cookie_sec.reveal_for_request()
+                    if sess.is_present("authorization"):
+                        auth_sec = sess.get("authorization")
+                        if auth_sec:
+                            headers["Authorization"] = auth_sec.reveal_for_request()
+
+            elif req.check_id == "A6":
+                if (
+                    "Cookie" not in headers
+                    and "Authorization" not in headers
+                    and req.actor in self._saved_pre_logout_sessions
+                ):
+                    old_sess = self._saved_pre_logout_sessions[req.actor]
+                    if old_sess.get("cookie"):
+                        headers["Cookie"] = old_sess["cookie"]
+                    if old_sess.get("authorization"):
+                        headers["Authorization"] = old_sess["authorization"]
+
+            req_to_send = PlannedRequest(
+                area=req.area,
+                check_id=req.check_id,
+                method=req.method,
+                path=req.path,
+                headers=headers,
+                body=body,
+                actor=req.actor,
+                expected=req.expected,
+                marker=req.marker,
+            )
+            effective_timeout = min(self.request_timeout, rem_area, rem_total)
+            req_res = self._execute_single_request(req_to_send, timeout=effective_timeout)
+            area_res.request_results.append(req_res)
+            result.all_request_results.append(req_res)
+            area_res.requests_sent += 1
+            result.requests_sent += 1
+
+            if req_res.timed_out:
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = req_res.error
+                result.status = "INCOMPLETE"
+                break
+
+            if req_res.status == "INCOMPLETE":
+                area_res.status = "INCOMPLETE"
+                area_res.error = req_res.error
+                result.status = "INCOMPLETE"
+                break
+
+            resp = req_res.response
+            if resp is None:
+                area_res.status = "INCOMPLETE"
+                break
+
+            if is_mfa_challenge(resp):
+                area_res.status = "NOT VERIFIED"
+                area_res.error = "unsupported authentication flow: MFA/CAPTCHA challenge detected"
+                break
+
+            cookie_str, auth_str = extract_session(resp)
+            session_issued = bool(cookie_str or auth_str)
+            session_val = cookie_str or auth_str
+            fingerprint = compute_fingerprint(self._run_hmac_key, session_val)
+            marker_present = (req.marker in resp.body) if req.marker else False
+            status_class = f"{resp.status // 100}xx"
+            classification = "incomplete"
+
+            if req.check_id == "A1":
+                if resp.status in deny_statuses and not marker_present:
+                    classification = "denied"
+                elif 200 <= resp.status < 300 and marker_present:
+                    classification = "allowed"
+                    area_res.findings.append(make_auth_finding("A1", req.path, resp.status))
+                else:
+                    classification = "ambiguous"
+                    ambiguous_detected = True
+                    area_res.error = f"ambiguous response on A1 unauthenticated access (HTTP {resp.status})"
+
+            elif req.check_id == "A2":
+                if session_issued or (200 <= resp.status < 300):
+                    classification = "allowed"
+                    area_res.findings.append(make_auth_finding("A2", req.path, resp.status))
+                elif (resp.status in deny_statuses or 400 <= resp.status < 500) and not session_issued:
+                    classification = "denied"
+                else:
+                    classification = "ambiguous"
+                    ambiguous_detected = True
+                    area_res.error = f"ambiguous response on A2 invalid credentials (HTTP {resp.status})"
+
+            elif req.check_id == "A3":
+                if 200 <= resp.status < 400 and session_issued:
+                    classification = "allowed"
+                    if self.vault and req.actor:
+                        sess = self.vault.get_session(req.actor)
+                        if cookie_str:
+                            sess.set("cookie", cookie_str)
+                        if auth_str:
+                            sess.set("authorization", auth_str)
+                        self._saved_pre_logout_sessions[req.actor] = {
+                            "cookie": cookie_str or "",
+                            "authorization": auth_str or "",
+                        }
+                else:
+                    classification = "incomplete"
+                    positive_control_failed = True
+                    area_res.error = (
+                        f"positive control failed: valid login for '{req.actor}' "
+                        f"failed (HTTP {resp.status}, session_issued={session_issued})"
+                    )
+
+            elif req.check_id == "A4":
+                if 200 <= resp.status < 300 and marker_present:
+                    classification = "allowed"
+                elif 200 <= resp.status < 300 and not marker_present:
+                    classification = "ambiguous"
+                    ambiguous_detected = True
+                    area_res.error = f"ambiguous response on A4: HTTP {resp.status} but protected marker absent"
+                elif resp.status in deny_statuses:
+                    classification = "denied"
+                    positive_control_failed = True
+                    area_res.error = f"positive control failed: authenticated access to {req.path} denied (HTTP {resp.status})"
+                else:
+                    classification = "ambiguous"
+                    ambiguous_detected = True
+                    area_res.error = f"ambiguous response on A4: HTTP {resp.status}"
+
+            elif req.check_id == "A5":
+                if 200 <= resp.status < 400:
+                    classification = "allowed"
+                    if self.vault and req.actor:
+                        self.vault.get_session(req.actor).clear()
+                else:
+                    classification = "incomplete"
+                    area_res.error = f"logout request failed with HTTP {resp.status}"
+
+            elif req.check_id == "A6":
+                if resp.status in deny_statuses and not marker_present:
+                    classification = "denied"
+                elif 200 <= resp.status < 300 and marker_present:
+                    classification = "allowed"
+                    area_res.findings.append(make_auth_finding("A6", req.path, resp.status))
+                else:
+                    classification = "ambiguous"
+                    ambiguous_detected = True
+                    area_res.error = f"ambiguous response on A6 reuse after logout (HTTP {resp.status})"
+
+            area_res.checks.append({
+                "check": req.check_id,
+                "area": "authentication",
+                "actors": [req.actor or "anonymous"],
+                "method": req.method,
+                "path": req.path,
+                "expected": req.expected,
+                "status_class": status_class,
+                "status": resp.status,
+                "classification": classification,
+                "marker_present": marker_present,
+                "elapsed_ms": round(req_res.elapsed_ms, 1),
+                "fingerprint": fingerprint,
+            })
+
+            if positive_control_failed or ambiguous_detected or (area_res.error and req.check_id in ("A5", "A6")):
+                break
+
+        if area_res.status == "NOT VERIFIED":
+            area_res.reason = area_res.error or "unsupported authentication flow"
+        elif positive_control_failed:
+            area_res.findings = []
+            area_res.status = "INCOMPLETE"
+            area_res.reason = area_res.error or "positive control failed"
+        elif area_res.findings:
+            area_res.status = "FAIL"
+            area_res.reason = f"{len(area_res.findings)} finding(s) detected"
+            area_res.runtime_checks_executed = (area_res.requests_sent == area_res.requests_planned)
+        elif ambiguous_detected or area_res.error or area_res.timed_out or area_res.budget_exceeded:
+            area_res.status = "INCOMPLETE"
+            area_res.reason = area_res.error or "execution incomplete"
+        else:
+            area_res.runtime_checks_executed = True
+            has_logout = any(r.check_id == "A5" for r in area_plan.requests)
+            if has_logout:
+                area_res.status = "PASS"
+                area_res.reason = "all authentication checks passed"
+            else:
+                area_res.status = "EXECUTED"
+                area_res.reason = "authentication checks executed; logout not declared (at most EXECUTED)"
 
         return result
 

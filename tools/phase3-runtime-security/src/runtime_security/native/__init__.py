@@ -1,5 +1,13 @@
 """Native verification module for Phase 3 runtime security."""
 
+from .auth import (
+    AUTH_NAMESPACE,
+    build_auth_requests,
+    compute_fingerprint,
+    extract_session,
+    is_mfa_challenge,
+    make_auth_finding,
+)
 from .eligibility import NativeEligibilityDecision, evaluate_native
 from .executor import (
     AREA_HARD_MAXIMUMS,
@@ -30,6 +38,7 @@ from .setup_adapter import (
 
 __all__ = [
     "AREA_HARD_MAXIMUMS",
+    "AUTH_NAMESPACE",
     "DEFAULT_REQUEST_TIMEOUT",
     "FIXTURE_MAX_REQUESTS",
     "LOCAL_APP_MAX_REQUESTS",
@@ -51,10 +60,15 @@ __all__ = [
     "RequestExecutionResult",
     "SecretValue",
     "SessionState",
+    "build_auth_requests",
     "build_plan",
     "build_setup_payload",
     "build_setup_request",
+    "compute_fingerprint",
     "evaluate_native",
     "execute_native_plan",
+    "extract_session",
+    "is_mfa_challenge",
+    "make_auth_finding",
     "validate_setup_response",
 ]

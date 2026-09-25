@@ -68,17 +68,17 @@ def build_plan(cfg: Config) -> NativePlan:
     
     # Auth logic
     if has_user and has_protected:
-        # A1, A2
-        count = 2
-        # A3 for each actor
-        count += len(actors)
-        # A4
-        count += 1
-        # A5, A6 (if logout)
-        has_logout = (cfg.authentication and cfg.authentication.logout and cfg.authentication.logout.enabled)
-        if has_logout:
-            count += 2
-        plan.areas["authentication"] = AreaPlan(True, "", count, 9)
+        from .auth import build_auth_requests
+
+        auth_requests = build_auth_requests(cfg)
+        count = len(auth_requests)
+        plan.areas["authentication"] = AreaPlan(
+            configured=True,
+            reason="",
+            requests_count=count,
+            budget=9,
+            requests=auth_requests,
+        )
         # Session S2 is 1 request (S1, S3-S6 reuse Auth requests)
         plan.areas["session"] = AreaPlan(True, "", 1, 1)
     else:
