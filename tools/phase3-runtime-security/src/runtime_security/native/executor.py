@@ -46,6 +46,11 @@ from ..utils.redaction import clean, redact, safe_header_value
 from .eligibility import NativeEligibilityDecision, evaluate_native
 from .identity import IdentityVault, SecretValue
 from .plan import AreaPlan, NativePlan, PlannedRequest
+from .setup_adapter import (
+    IdentitySetupResult,
+    build_setup_request,
+    validate_setup_response,
+)
 
 USER_AGENT = "phase3-runtime-security/0.1 (native-verification)"
 SAFE_NATIVE_METHODS = frozenset({"GET", "HEAD", "POST"})
@@ -287,6 +292,7 @@ class NativeExecutionResult:
     timed_out: bool = False
     refused: bool = False
     refusal_reason: str = ""
+    setup_result: IdentitySetupResult | None = None
     area_results: dict[str, AreaExecutionResult] = field(default_factory=dict)
     all_request_results: list[RequestExecutionResult] = field(default_factory=list)
 
@@ -305,7 +311,8 @@ class NativeExecutionResult:
         return (
             f"NativeExecutionResult(status={self.status!r}, "
             f"requests_sent={self.requests_sent}/{self.total_budget}, "
-            f"timed_out={self.timed_out!r}, refused={self.refused!r})"
+            f"timed_out={self.timed_out!r}, refused={self.refused!r}, "
+            f"setup_result={self.setup_result!r})"
         )
 
 
@@ -322,7 +329,17 @@ class NativeExecutor:
         total_timeout: float = MAX_TOTAL_TIMEOUT,
     ) -> None:
         self.cfg = cfg
-        self.vault = vault
+        if vault is not None:
+            self.vault = vault
+        elif self.cfg.runtime_verification and self.cfg.runtime_verification.actors:
+            import secrets
+
+            self.vault = IdentityVault(
+                run_id=secrets.token_hex(16),
+                actors=list(self.cfg.runtime_verification.actors.keys()),
+            )
+        else:
+            self.vault = None
 
         # Timeouts: never exceed bounds
         self.request_timeout = (
@@ -534,6 +551,14 @@ class NativeExecutor:
             self._mark_all_areas_incomplete(plan, result, "plan exceeds request budget")
             return result
 
+        # Fixture mode must not use identity setup hook (Design §7.1, Requirement 1)
+        if mode == "fixture" and (plan.setup_requests or plan.identity_setup_count > 0):
+            result.status = "INCOMPLETE"
+            result.refused = True
+            result.refusal_reason = "fixture mode must not use identity setup hook"
+            self._mark_all_areas_incomplete(plan, result, result.refusal_reason)
+            return result
+
         if plan.total_verification_requests > FIXTURE_MAX_REQUESTS:
             result.status = "INCOMPLETE"
             result.refused = True
@@ -589,6 +614,28 @@ class NativeExecutor:
                 self._mark_all_areas_incomplete(plan, result, result.refusal_reason)
                 return result
 
+        # Local-app mode auto-generates setup request if not already provided
+        if (
+            mode == "local-app"
+            and plan.identity_setup_count == 1
+            and not plan.setup_requests
+        ):
+            if (
+                self.cfg.runtime_verification
+                and self.cfg.runtime_verification.identity_setup
+                and self.vault
+            ):
+                plan.setup_requests = [build_setup_request(self.cfg, self.vault)]
+
+        if len(plan.setup_requests) > SETUP_MAX_REQUESTS:
+            result.status = "INCOMPLETE"
+            result.refused = True
+            result.refusal_reason = (
+                f"setup request count ({len(plan.setup_requests)}) exceeds limit ({SETUP_MAX_REQUESTS})"
+            )
+            self._mark_all_areas_incomplete(plan, result, result.refusal_reason)
+            return result
+
         # ── 3. EXECUTION PHASE ─────────────────────────────────────────
         start_total = time.monotonic()
 
@@ -597,14 +644,14 @@ class NativeExecutor:
             setup_timed_out = False
             setup_failed = False
             setup_err = ""
-            for setup_req in plan.setup_requests:
-                now = time.monotonic()
-                rem_total = self.total_timeout - (now - start_total)
-                if rem_total <= 0:
-                    setup_timed_out = True
-                    setup_err = "total run timeout exceeded during identity setup"
-                    break
+            setup_req = plan.setup_requests[0]
 
+            now = time.monotonic()
+            rem_total = self.total_timeout - (now - start_total)
+            if rem_total <= 0:
+                setup_timed_out = True
+                setup_err = "total run timeout exceeded during identity setup"
+            else:
                 curr_timeout = min(self.request_timeout, rem_total)
                 s_res = self._execute_single_request(setup_req, timeout=curr_timeout)
                 result.all_request_results.append(s_res)
@@ -613,18 +660,57 @@ class NativeExecutor:
                 if s_res.timed_out:
                     setup_timed_out = True
                     setup_err = s_res.error or "identity setup timed out"
-                    break
-                if s_res.status == "INCOMPLETE" or (
-                    s_res.status_code is not None and s_res.status_code not in (200, 201)
-                ):
+                    result.setup_result = IdentitySetupResult(
+                        succeeded=False,
+                        adapter="http-local",
+                        path=setup_req.path,
+                        run_id=self.vault.run_id if self.vault else "",
+                        accepted=[],
+                        error=setup_err,
+                    )
+                elif s_res.status == "INCOMPLETE":
                     setup_failed = True
-                    setup_err = s_res.error or f"identity setup failed with status {s_res.status_code}"
-                    break
+                    setup_err = s_res.error or "identity setup connection error"
+                    result.setup_result = IdentitySetupResult(
+                        succeeded=False,
+                        adapter="http-local",
+                        path=setup_req.path,
+                        run_id=self.vault.run_id if self.vault else "",
+                        accepted=[],
+                        error=setup_err,
+                    )
+                else:
+                    expected_actors = (
+                        list(self.cfg.runtime_verification.actors.keys())
+                        if self.cfg.runtime_verification
+                        else []
+                    )
+                    expected_run_id = self.vault.run_id if self.vault else ""
+                    val_res = validate_setup_response(
+                        resp=s_res.response,
+                        expected_run_id=expected_run_id,
+                        expected_labels=expected_actors,
+                        vault=self.vault,
+                        path=setup_req.path,
+                    )
+                    result.setup_result = val_res
+
+                    # Response body discarded unread (Design §7.1)
+                    if s_res.response is not None:
+                        s_res.response.body = ""
+
+                    if not val_res.succeeded:
+                        setup_failed = True
+                        setup_err = val_res.error or "identity setup validation failed"
+                        s_res.status = "INCOMPLETE"
+                        s_res.error = setup_err
 
             if setup_timed_out or setup_failed:
                 result.status = "INCOMPLETE"
                 result.timed_out = setup_timed_out
-                reason = "identity setup timed out" if setup_timed_out else "identity setup failed"
+                reason = setup_err or (
+                    "identity setup timed out" if setup_timed_out else "identity setup failed"
+                )
                 for area_name in VERIFICATION_AREAS:
                     ap = plan.areas.get(area_name)
                     result.area_results[area_name] = AreaExecutionResult(
@@ -632,7 +718,7 @@ class NativeExecutor:
                         status="INCOMPLETE",
                         configured=ap.configured if ap else False,
                         timed_out=setup_timed_out,
-                        error=setup_err or reason,
+                        error=reason,
                     )
                 result.elapsed_seconds = time.monotonic() - start_total
                 return result

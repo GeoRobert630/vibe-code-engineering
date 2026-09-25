@@ -52,3 +52,7 @@ class IdentityVault:
         if actor not in self.sessions:
             raise ValueError(f"Unknown actor: {actor}")
         return self.sessions[actor]
+
+    @property
+    def actors(self) -> List[str]:
+        return list(self._actor_secrets.keys())

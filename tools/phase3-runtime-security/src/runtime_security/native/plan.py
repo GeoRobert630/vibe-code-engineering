@@ -43,7 +43,14 @@ def build_plan(cfg: Config) -> NativePlan:
 
     # 1. Identity setup
     if rv.mode == "local-app":
-        plan.identity_setup_count = 1 if rv.identity_setup else 0
+        if not rv.identity_setup:
+            for area in ["authentication", "session", "authorization", "idor_bola", "tenant_isolation"]:
+                plan.areas[area] = AreaPlan(False, "missing identity_setup in local-app mode")
+            plan.identity_setup_count = 0
+            return plan
+        plan.identity_setup_count = 1
+    else:
+        plan.identity_setup_count = 0
 
     actors = rv.actors
     users = [k for k, v in actors.items() if v.role == "user"]
