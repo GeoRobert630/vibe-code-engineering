@@ -93,7 +93,11 @@ def build_plan(cfg: Config) -> NativePlan:
     has_admin = len(admins) >= 1
     has_privileged = "privileged" in rv.routes
     if has_user and has_admin and has_privileged:
-        plan.areas["authorization"] = AreaPlan(True, "", 2, 2)  # Z1, Z2
+        from .authz import build_authz_requests
+
+        authz_requests = build_authz_requests(cfg)
+        count = len(authz_requests)
+        plan.areas["authorization"] = AreaPlan(True, "", count, 2, authz_requests)
     else:
         plan.areas["authorization"] = AreaPlan(False, "missing user, admin, or privileged route")
 

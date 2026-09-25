@@ -8,6 +8,12 @@ from .auth import (
     is_mfa_challenge,
     make_auth_finding,
 )
+from .authz import (
+    AUTHZ_NAMESPACE,
+    build_authz_requests,
+    evaluate_authz_checks,
+    make_authz_finding,
+)
 from .eligibility import NativeEligibilityDecision, evaluate_native
 from .executor import (
     AREA_HARD_MAXIMUMS,
@@ -47,6 +53,7 @@ from .setup_adapter import (
 __all__ = [
     "AREA_HARD_MAXIMUMS",
     "AUTH_NAMESPACE",
+    "AUTHZ_NAMESPACE",
     "DEFAULT_REQUEST_TIMEOUT",
     "FIXTURE_MAX_REQUESTS",
     "LOCAL_APP_MAX_REQUESTS",
@@ -70,11 +77,13 @@ __all__ = [
     "SecretValue",
     "SessionState",
     "build_auth_requests",
+    "build_authz_requests",
     "build_plan",
     "build_session_requests",
     "build_setup_payload",
     "build_setup_request",
     "compute_fingerprint",
+    "evaluate_authz_checks",
     "evaluate_native",
     "evaluate_session_checks",
     "execute_native_plan",
@@ -82,6 +91,7 @@ __all__ = [
     "extract_session",
     "is_mfa_challenge",
     "make_auth_finding",
+    "make_authz_finding",
     "make_session_finding",
     "parse_cookie_attributes",
     "validate_setup_response",

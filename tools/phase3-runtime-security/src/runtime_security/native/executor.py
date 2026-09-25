@@ -856,6 +856,20 @@ class NativeExecutor:
                 result.area_results[area_name] = area_res
                 continue
 
+            # If this is authorization verification with declared actors, run authorization evaluation
+            # using authentication evidence. This enforces A3 prerequisites.
+            if area_name == "authorization" and any(r.actor is not None for r in requests_to_run):
+                self._execute_authz_area(
+                    area_plan=area_plan,
+                    area_res=area_res,
+                    start_total=start_total,
+                    area_start=area_start,
+                    result=result,
+                    plan=plan,
+                )
+                result.area_results[area_name] = area_res
+                continue
+
             # Execute requests for this area
             for req in requests_to_run:
                 now = time.monotonic()
@@ -1461,6 +1475,351 @@ class NativeExecutor:
         area_res.runtime_checks_executed = (
             area_res.requests_sent == area_res.requests_planned
             and status in ("PASS", "FAIL", "EXECUTED")
+        )
+
+    def _execute_authz_area(
+        self,
+        area_plan: AreaPlan,
+        area_res: AreaExecutionResult,
+        start_total: float,
+        area_start: float,
+        result: NativeExecutionResult,
+        plan: NativePlan,
+    ) -> None:
+        """Execute and evaluate vertical authorization checks (Z1-Z2) deterministically (Design §10, §15, §16, §17).
+
+        Z1: Privileged authorization positive control (admin actor GET privileged route).
+        Z2: Low-privilege authorization denial (user actor GET privileged route).
+        """
+        cfg = self.cfg
+        deny_statuses = (
+            cfg.runtime_verification.deny_statuses
+            if cfg.runtime_verification and cfg.runtime_verification.deny_statuses
+            else frozenset({401, 403, 404})
+        )
+
+        # 1. Prerequisite: Authentication area must have executed successfully
+        auth_res = result.area_results.get("authentication")
+        if not auth_res or not auth_res.checks:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authentication area not executed; authorization depends on authentication"
+            area_res.reason = area_res.error
+            return
+
+        if auth_res.status == "NOT VERIFIED":
+            area_res.status = "NOT VERIFIED"
+            area_res.error = "authentication area not verified (MFA/unsupported flow)"
+            area_res.reason = area_res.error
+            return
+
+        # 2. Identify Z1 (admin) and Z2 (user) requests
+        admin_req: PlannedRequest | None = None
+        user_req: PlannedRequest | None = None
+        for req in area_plan.requests:
+            if req.check_id == "Z1":
+                admin_req = req
+            elif req.check_id == "Z2":
+                user_req = req
+
+        if not admin_req or not user_req or not admin_req.actor or not user_req.actor:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authorization requests (Z1, Z2) missing from plan or actors undeclared"
+            area_res.reason = area_res.error
+            return
+
+        admin_actor = admin_req.actor
+        user_actor = user_req.actor
+
+        # 3. Prerequisite: Both admin and user must have succeeded in A3 positive control
+        admin_a3_ok = any(
+            c.get("check") == "A3"
+            and admin_actor in c.get("actors", [])
+            and c.get("classification") == "allowed"
+            for c in auth_res.checks
+        )
+        user_a3_ok = any(
+            c.get("check") == "A3"
+            and user_actor in c.get("actors", [])
+            and c.get("classification") == "allowed"
+            for c in auth_res.checks
+        )
+        if not admin_a3_ok or not user_a3_ok:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authentication positive control (A3) not established for authorization actors"
+            area_res.reason = area_res.error
+            return
+
+        # Helper to attach actor session
+        def _attach_session(actor: str, headers_dict: dict[str, str]) -> None:
+            if self.vault:
+                sess = self.vault.get_session(actor)
+                if sess.is_present("cookie") and sess.get("cookie"):
+                    headers_dict["Cookie"] = sess.get("cookie").reveal_for_request()
+                if sess.is_present("authorization") and sess.get("authorization"):
+                    headers_dict["Authorization"] = sess.get("authorization").reveal_for_request()
+            if "Cookie" not in headers_dict and "Authorization" not in headers_dict:
+                old = self._saved_pre_logout_sessions.get(actor, {})
+                if old.get("cookie"):
+                    headers_dict["Cookie"] = old["cookie"]
+                if old.get("authorization"):
+                    headers_dict["Authorization"] = old["authorization"]
+
+        # 4. Execute Z1: Privileged positive control
+        now = time.monotonic()
+        rem_total = self.total_timeout - (now - start_total)
+        if rem_total <= 0:
+            result.timed_out = True
+            result.status = "INCOMPLETE"
+            area_res.timed_out = True
+            area_res.status = "INCOMPLETE"
+            area_res.error = "total run timeout exceeded (180s)"
+            area_res.reason = area_res.error
+            return
+
+        rem_area = self.area_timeout - (now - area_start)
+        if rem_area <= 0:
+            area_res.timed_out = True
+            area_res.status = "INCOMPLETE"
+            area_res.error = f"area timeout exceeded ({self.area_timeout:.1f}s)"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        assert self.client is not None
+        if self.client.sent >= self.client.max_budget:
+            area_res.budget_exceeded = True
+            area_res.status = "INCOMPLETE"
+            area_res.error = f"total request budget ({self.client.max_budget}) exhausted"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        hard_max = AREA_HARD_MAXIMUMS.get("authorization", 2)
+        if area_res.requests_sent >= hard_max:
+            area_res.budget_exceeded = True
+            area_res.status = "INCOMPLETE"
+            area_res.error = f"area hard maximum ({hard_max}) reached"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        z1_headers = dict(admin_req.headers)
+        _attach_session(admin_actor, z1_headers)
+
+        req_to_send_z1 = PlannedRequest(
+            area=admin_req.area,
+            check_id=admin_req.check_id,
+            method=admin_req.method,
+            path=admin_req.path,
+            headers=z1_headers,
+            body=admin_req.body,
+            actor=admin_req.actor,
+            expected=admin_req.expected,
+            marker=admin_req.marker,
+        )
+        effective_timeout = min(self.request_timeout, rem_area, rem_total)
+        req_res_z1 = self._execute_single_request(req_to_send_z1, timeout=effective_timeout)
+        area_res.request_results.append(req_res_z1)
+        result.all_request_results.append(req_res_z1)
+        area_res.requests_sent += 1
+        result.requests_sent += 1
+
+        if req_res_z1.timed_out:
+            area_res.timed_out = True
+            area_res.status = "INCOMPLETE"
+            area_res.error = req_res_z1.error
+            area_res.reason = area_res.error or "Z1 request timed out"
+            result.status = "INCOMPLETE"
+            return
+
+        if req_res_z1.status == "INCOMPLETE":
+            area_res.status = "INCOMPLETE"
+            area_res.error = req_res_z1.error
+            area_res.reason = area_res.error or "Z1 request failed"
+            result.status = "INCOMPLETE"
+            return
+
+        resp_z1 = req_res_z1.response
+        if resp_z1 is None:
+            area_res.status = "INCOMPLETE"
+            area_res.reason = "no response from Z1 request"
+            return
+
+        marker_present_z1 = (admin_req.marker in resp_z1.body) if admin_req.marker else False
+        status_class_z1 = f"{resp_z1.status // 100}xx"
+
+        if 200 <= resp_z1.status < 300 and marker_present_z1:
+            z1_classification = "allowed"
+        elif resp_z1.status in deny_statuses and not marker_present_z1:
+            z1_classification = "denied"
+        elif 200 <= resp_z1.status < 300 and not marker_present_z1:
+            z1_classification = "ambiguous"
+        elif resp_z1.status in (400, 405, 409, 422) or (300 <= resp_z1.status < 400):
+            z1_classification = "ambiguous"
+        elif resp_z1.status in deny_statuses and marker_present_z1:
+            z1_classification = "ambiguous"
+        else:
+            z1_classification = "incomplete"
+
+        z1_check = {
+            "check": "Z1",
+            "area": "authorization",
+            "actors": [admin_actor],
+            "method": admin_req.method,
+            "path": admin_req.path,
+            "expected": "allowed",
+            "status_class": status_class_z1,
+            "status": resp_z1.status,
+            "classification": z1_classification,
+            "marker_present": marker_present_z1,
+            "elapsed_ms": round(req_res_z1.elapsed_ms, 1),
+            "fingerprint": None,
+        }
+
+        # If positive control failed, stop and mark INCOMPLETE (no findings fabricated)
+        if z1_classification != "allowed":
+            area_res.checks = [z1_check]
+            area_res.findings = []
+            area_res.status = "INCOMPLETE"
+            area_res.error = (
+                f"privileged authorization positive control Z1 failed (classification={z1_classification})"
+            )
+            area_res.reason = area_res.error
+            return
+
+        # 5. Execute Z2: Low-privilege authorization denial
+        now = time.monotonic()
+        rem_total = self.total_timeout - (now - start_total)
+        if rem_total <= 0:
+            result.timed_out = True
+            result.status = "INCOMPLETE"
+            area_res.timed_out = True
+            area_res.status = "INCOMPLETE"
+            area_res.checks = [z1_check]
+            area_res.error = "total run timeout exceeded (180s)"
+            area_res.reason = area_res.error
+            return
+
+        rem_area = self.area_timeout - (now - area_start)
+        if rem_area <= 0:
+            area_res.timed_out = True
+            area_res.status = "INCOMPLETE"
+            area_res.checks = [z1_check]
+            area_res.error = f"area timeout exceeded ({self.area_timeout:.1f}s)"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        if self.client.sent >= self.client.max_budget:
+            area_res.budget_exceeded = True
+            area_res.status = "INCOMPLETE"
+            area_res.checks = [z1_check]
+            area_res.error = f"total request budget ({self.client.max_budget}) exhausted"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        if area_res.requests_sent >= hard_max:
+            area_res.budget_exceeded = True
+            area_res.status = "INCOMPLETE"
+            area_res.checks = [z1_check]
+            area_res.error = f"area hard maximum ({hard_max}) reached"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        z2_headers = dict(user_req.headers)
+        _attach_session(user_actor, z2_headers)
+
+        req_to_send_z2 = PlannedRequest(
+            area=user_req.area,
+            check_id=user_req.check_id,
+            method=user_req.method,
+            path=user_req.path,
+            headers=z2_headers,
+            body=user_req.body,
+            actor=user_req.actor,
+            expected=user_req.expected,
+            marker=user_req.marker,
+        )
+        effective_timeout = min(self.request_timeout, rem_area, rem_total)
+        req_res_z2 = self._execute_single_request(req_to_send_z2, timeout=effective_timeout)
+        area_res.request_results.append(req_res_z2)
+        result.all_request_results.append(req_res_z2)
+        area_res.requests_sent += 1
+        result.requests_sent += 1
+
+        if req_res_z2.timed_out:
+            area_res.timed_out = True
+            area_res.status = "INCOMPLETE"
+            area_res.checks = [z1_check]
+            area_res.error = req_res_z2.error
+            area_res.reason = area_res.error or "Z2 request timed out"
+            result.status = "INCOMPLETE"
+            return
+
+        if req_res_z2.status == "INCOMPLETE":
+            area_res.status = "INCOMPLETE"
+            area_res.checks = [z1_check]
+            area_res.error = req_res_z2.error
+            area_res.reason = area_res.error or "Z2 request failed"
+            result.status = "INCOMPLETE"
+            return
+
+        resp_z2 = req_res_z2.response
+        if resp_z2 is None:
+            area_res.checks = [z1_check]
+            area_res.status = "INCOMPLETE"
+            area_res.reason = "no response from Z2 request"
+            return
+
+        marker_present_z2 = (user_req.marker in resp_z2.body) if user_req.marker else False
+        status_class_z2 = f"{resp_z2.status // 100}xx"
+
+        if resp_z2.status in deny_statuses and not marker_present_z2:
+            z2_classification = "denied"
+        elif 200 <= resp_z2.status < 300 and marker_present_z2:
+            z2_classification = "allowed"
+        elif 200 <= resp_z2.status < 300 and not marker_present_z2:
+            z2_classification = "ambiguous"
+        elif resp_z2.status in (400, 405, 409, 422) or (300 <= resp_z2.status < 400):
+            z2_classification = "ambiguous"
+        elif resp_z2.status in deny_statuses and marker_present_z2:
+            z2_classification = "ambiguous"
+        else:
+            z2_classification = "incomplete"
+
+        z2_check = {
+            "check": "Z2",
+            "area": "authorization",
+            "actors": [user_actor],
+            "method": user_req.method,
+            "path": user_req.path,
+            "expected": "denied",
+            "status_class": status_class_z2,
+            "status": resp_z2.status,
+            "classification": z2_classification,
+            "marker_present": marker_present_z2,
+            "elapsed_ms": round(req_res_z2.elapsed_ms, 1),
+            "fingerprint": None,
+        }
+
+        # 6. Evaluate authorization checks using authz module
+        from .authz import evaluate_authz_checks
+        checks, findings, status, reason = evaluate_authz_checks(
+            z1_check=z1_check,
+            z2_check=z2_check,
+            privileged_path=user_req.path,
+            user_actor=user_actor,
+        )
+
+        area_res.checks = checks
+        area_res.findings = findings
+        area_res.status = status
+        area_res.reason = reason
+        area_res.runtime_checks_executed = (
+            area_res.requests_sent == area_res.requests_planned
+            and status in ("PASS", "FAIL")
         )
 
     def _mark_all_areas_incomplete(
