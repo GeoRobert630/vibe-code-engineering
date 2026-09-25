@@ -80,7 +80,10 @@ def build_plan(cfg: Config) -> NativePlan:
             requests=auth_requests,
         )
         # Session S2 is 1 request (S1, S3-S6 reuse Auth requests)
-        plan.areas["session"] = AreaPlan(True, "", 1, 1)
+        from .session import build_session_requests
+        session_requests = build_session_requests(cfg)
+        session_count = len(session_requests)
+        plan.areas["session"] = AreaPlan(True, "", session_count, 1, session_requests)
     else:
         reason = "missing user actor or protected route"
         plan.areas["authentication"] = AreaPlan(False, reason)

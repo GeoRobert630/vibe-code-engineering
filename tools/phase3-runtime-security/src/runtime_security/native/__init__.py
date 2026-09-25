@@ -27,6 +27,14 @@ from .executor import (
 )
 from .identity import IdentityVault, SecretValue, SessionState
 from .plan import AreaPlan, NativePlan, build_plan
+from .session import (
+    SESSION_NAMESPACE,
+    build_session_requests,
+    evaluate_session_checks,
+    extract_all_cookie_attributes,
+    make_session_finding,
+    parse_cookie_attributes,
+)
 from .setup_adapter import (
     SETUP_EXPIRES_IN_SECONDS,
     SETUP_SCHEMA,
@@ -44,6 +52,7 @@ __all__ = [
     "LOCAL_APP_MAX_REQUESTS",
     "MAX_AREA_TIMEOUT",
     "MAX_TOTAL_TIMEOUT",
+    "SESSION_NAMESPACE",
     "SETUP_EXPIRES_IN_SECONDS",
     "SETUP_MAX_REQUESTS",
     "SETUP_SCHEMA",
@@ -62,13 +71,18 @@ __all__ = [
     "SessionState",
     "build_auth_requests",
     "build_plan",
+    "build_session_requests",
     "build_setup_payload",
     "build_setup_request",
     "compute_fingerprint",
     "evaluate_native",
+    "evaluate_session_checks",
     "execute_native_plan",
+    "extract_all_cookie_attributes",
     "extract_session",
     "is_mfa_challenge",
     "make_auth_finding",
+    "make_session_finding",
+    "parse_cookie_attributes",
     "validate_setup_response",
 ]

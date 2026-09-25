@@ -127,7 +127,7 @@ class _AuthTestServer:
                             outer.valid_sessions.add(session_id)
                             self.send_response(200)
                             if outer.auth_mode == "cookie":
-                                self.send_header("Set-Cookie", f"session_id={session_id}; Path=/; HttpOnly")
+                                self.send_header("Set-Cookie", f"session_id={session_id}; Path=/; HttpOnly; SameSite=Lax")
                                 self.send_header("Content-Type", "application/json")
                                 self.end_headers()
                                 self.wfile.write(b'{"status": "ok"}')
@@ -157,7 +157,7 @@ class _AuthTestServer:
                     outer.valid_sessions.add(session_id)
                     self.send_response(200)
                     if outer.auth_mode == "cookie":
-                        self.send_header("Set-Cookie", f"session_id={session_id}; Path=/; HttpOnly")
+                        self.send_header("Set-Cookie", f"session_id={session_id}; Path=/; HttpOnly; SameSite=Lax")
                         self.send_header("Content-Type", "application/json")
                         self.end_headers()
                         self.wfile.write(b'{"status": "ok"}')
@@ -624,8 +624,9 @@ def test_auth_deterministic_request_order_and_bounds():
         # [5] = A4 (GET /api/profile, user_a)
         # [6] = A5 (POST /api/logout, user_a)
         # [7] = A6 (GET /api/profile, user_a)
+        # [8] = S2 (GET /api/profile, admin_a) - session continuity with active session
         log = server.requests_log
-        assert len(log) == 8  # 1 setup + 7 auth verification requests
+        assert len(log) == 9  # 1 setup + 7 auth + 1 session verification request
 
         assert log[0][0] == "POST" and log[0][1] == "/_security/setup-identities"
         assert log[1][0] == "GET" and log[1][1] == "/api/profile"
@@ -635,6 +636,7 @@ def test_auth_deterministic_request_order_and_bounds():
         assert log[5][0] == "GET" and log[5][1] == "/api/profile"
         assert log[6][0] == "POST" and log[6][1] == "/api/logout"
         assert log[7][0] == "GET" and log[7][1] == "/api/profile"
+        assert log[8][0] == "GET" and log[8][1] == "/api/profile"
 
         # Check actors sent in order
         admin_body = json.loads(log[3][3].decode("utf-8"))
@@ -642,8 +644,11 @@ def test_auth_deterministic_request_order_and_bounds():
         assert admin_body["email"] == "admin_a"
         assert user_body["email"] == "user_a"
 
-        # Budget bounded
-        assert len(log) - 1 <= AREA_HARD_MAXIMUMS["authentication"]
+        # S2 sends session continuity request with active session (admin_a)
+        assert "session_id=sess_valid_admin_a" in log[8][2].get("Cookie", "")
+
+        # Budget bounded: auth + session requests within hard maximums
+        assert len(log) - 1 <= AREA_HARD_MAXIMUMS["authentication"] + AREA_HARD_MAXIMUMS["session"]
     finally:
         server.close()
 

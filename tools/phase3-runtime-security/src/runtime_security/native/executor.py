@@ -51,6 +51,12 @@ from .auth import compute_fingerprint, extract_session, is_mfa_challenge, make_a
 from .eligibility import NativeEligibilityDecision, evaluate_native
 from .identity import IdentityVault, SecretValue
 from .plan import AreaPlan, NativePlan, PlannedRequest
+from .session import (
+    SESSION_NAMESPACE,
+    build_session_requests,
+    evaluate_session_checks,
+    extract_all_cookie_attributes,
+)
 from .setup_adapter import (
     IdentitySetupResult,
     build_setup_request,
@@ -286,7 +292,14 @@ class AreaExecutionResult:
     source: str = "native"
 
     def to_report_dict(self, actors: list[str] | None = None) -> dict[str, Any]:
-        ns = "RT-AUTH-*" if self.area == "authentication" else f"RT-{self.area.upper()[:4]}-*"
+        _ns_map = {
+            "authentication": "RT-AUTH-*",
+            "session": "RT-SESSION-*",
+            "authorization": "RT-AUTHZ-*",
+            "idor_bola": "RT-IDOR-*",
+            "tenant_isolation": "RT-TENANT-*",
+        }
+        ns = _ns_map.get(self.area, f"RT-{self.area.upper()}-*")
         return {
             "status": self.status,
             "source": self.source,
@@ -390,6 +403,11 @@ class NativeExecutor:
 
         self._run_hmac_key = secrets.token_bytes(32)
         self._saved_pre_logout_sessions: dict[str, dict[str, str]] = {}
+        self._pre_auth_fingerprints: dict[str, str | None] = {}
+        self._pre_auth_cookie: SecretValue | None = None
+        self._pre_auth_fingerprint: str | None = None
+        self._pre_auth_sent: bool = False
+        self._a3_cookie_attributes: dict[str, dict[str, bool] | None] = {}
 
         # Target safety gate & eligibility check before any connection
         self.eligibility = eligibility if eligibility is not None else evaluate_native(cfg)
@@ -824,6 +842,20 @@ class NativeExecutor:
                 result.area_results[area_name] = area_res
                 continue
 
+            # If this is session verification with declared actors, run session evaluation
+            # using authentication evidence. This enforces A3 prerequisites.
+            if area_name == "session" and any(r.actor is not None for r in requests_to_run):
+                self._execute_session_area(
+                    area_plan=area_plan,
+                    area_res=area_res,
+                    start_total=start_total,
+                    area_start=area_start,
+                    result=result,
+                    plan=plan,
+                )
+                result.area_results[area_name] = area_res
+                continue
+
             # Execute requests for this area
             for req in requests_to_run:
                 now = time.monotonic()
@@ -927,6 +959,9 @@ class NativeExecutor:
         password_field = login_cfg.password_field if login_cfg else "password"
         content_type = login_cfg.content_type if login_cfg else "application/json"
 
+        users = [k for k, v in sorted(cfg.runtime_verification.actors.items()) if v.role == "user"] if cfg.runtime_verification else []
+        primary_user = "user_a" if "user_a" in users else (users[0] if users else "user_a")
+
         positive_control_failed = False
         ambiguous_detected = False
 
@@ -989,6 +1024,13 @@ class NativeExecutor:
                     else:
                         body = json.dumps(payload_dict).encode("utf-8")
                         headers.setdefault("Content-Type", "application/json")
+                if (
+                    req.actor == primary_user
+                    and self._pre_auth_cookie is not None
+                    and "Cookie" not in headers
+                ):
+                    headers["Cookie"] = self._pre_auth_cookie.reveal_for_request()
+                    self._pre_auth_sent = True
 
             elif req.check_id in ("A4", "A5"):
                 if (
@@ -1069,6 +1111,10 @@ class NativeExecutor:
             classification = "incomplete"
 
             if req.check_id == "A1":
+                # Track pre-auth cookie for S4 rotation detection
+                if cookie_str and fingerprint:
+                    self._pre_auth_cookie = SecretValue(cookie_str)
+                    self._pre_auth_fingerprint = fingerprint
                 if resp.status in deny_statuses and not marker_present:
                     classification = "denied"
                 elif 200 <= resp.status < 300 and marker_present:
@@ -1103,6 +1149,14 @@ class NativeExecutor:
                             "cookie": cookie_str or "",
                             "authorization": auth_str or "",
                         }
+                    # Store cookie attributes for S5 evaluation
+                    if cookie_str and req.actor:
+                        self._a3_cookie_attributes[req.actor] = extract_all_cookie_attributes(resp)
+                    elif req.actor:
+                        self._a3_cookie_attributes[req.actor] = None  # bearer token, no cookies
+                    # If this was the actor sent with pre-auth cookie, record pre-auth fingerprint
+                    if req.actor == primary_user and self._pre_auth_sent and self._pre_auth_fingerprint:
+                        self._pre_auth_fingerprints[primary_user] = self._pre_auth_fingerprint
                 else:
                     classification = "incomplete"
                     positive_control_failed = True
@@ -1147,7 +1201,7 @@ class NativeExecutor:
                     ambiguous_detected = True
                     area_res.error = f"ambiguous response on A6 reuse after logout (HTTP {resp.status})"
 
-            area_res.checks.append({
+            check_record = {
                 "check": req.check_id,
                 "area": "authentication",
                 "actors": [req.actor or "anonymous"],
@@ -1160,7 +1214,11 @@ class NativeExecutor:
                 "marker_present": marker_present,
                 "elapsed_ms": round(req_res.elapsed_ms, 1),
                 "fingerprint": fingerprint,
-            })
+            }
+            # Attach cookie attributes to A3 checks for S5 evaluation
+            if req.check_id == "A3" and req.actor and req.actor in self._a3_cookie_attributes:
+                check_record["cookie_attributes"] = self._a3_cookie_attributes[req.actor]
+            area_res.checks.append(check_record)
 
             if positive_control_failed or ambiguous_detected or (area_res.error and req.check_id in ("A5", "A6")):
                 break
@@ -1189,6 +1247,221 @@ class NativeExecutor:
                 area_res.reason = "authentication checks executed; logout not declared (at most EXECUTED)"
 
         return result
+
+    def _execute_session_area(
+        self,
+        area_plan: AreaPlan,
+        area_res: AreaExecutionResult,
+        start_total: float,
+        area_start: float,
+        result: NativeExecutionResult,
+        plan: NativePlan,
+    ) -> None:
+        """Execute and evaluate session checks (S1-S6) deterministically (Design §9).
+
+        S1, S3, S4, S5, S6 reuse authentication evidence.
+        S2 sends exactly 1 new request (GET protected with same session).
+        """
+        cfg = self.cfg
+        deny_statuses = (
+            cfg.runtime_verification.deny_statuses
+            if cfg.runtime_verification and cfg.runtime_verification.deny_statuses
+            else frozenset({401, 403, 404})
+        )
+
+        # Get authentication results for reuse
+        auth_res = result.area_results.get("authentication")
+        if not auth_res or not auth_res.checks:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authentication area not executed; session depends on authentication"
+            area_res.reason = area_res.error
+            return
+
+        if auth_res.status == "INCOMPLETE" and not any(
+            c.get("check") == "A3" and c.get("classification") == "allowed"
+            for c in auth_res.checks
+        ):
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authentication positive control not established"
+            area_res.reason = area_res.error
+            return
+
+        if auth_res.status == "NOT VERIFIED":
+            area_res.status = "NOT VERIFIED"
+            area_res.error = "authentication area not verified (MFA/unsupported flow)"
+            area_res.reason = area_res.error
+            return
+
+        has_logout = any(r.check_id == "A5" for r in (plan.areas.get("authentication", AreaPlan(False)).requests or []))
+
+        # Determine primary user
+        users = [k for k, v in sorted(cfg.runtime_verification.actors.items()) if v.role == "user"] if cfg.runtime_verification else []
+        primary_user = "user_a" if "user_a" in users else (users[0] if users else "user_a")
+
+        # Execute S2 request (GET protected route with session)
+        s2_check: dict[str, Any] | None = None
+        for req in area_plan.requests:
+            if req.check_id != "S2":
+                continue
+
+            now = time.monotonic()
+            rem_total = self.total_timeout - (now - start_total)
+            if rem_total <= 0:
+                result.timed_out = True
+                result.status = "INCOMPLETE"
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = "total run timeout exceeded (180s)"
+                area_res.reason = area_res.error
+                return
+
+            rem_area = self.area_timeout - (now - area_start)
+            if rem_area <= 0:
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"area timeout exceeded ({self.area_timeout:.1f}s)"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return
+
+            assert self.client is not None
+            if self.client.sent >= self.client.max_budget:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"total request budget ({self.client.max_budget}) exhausted"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return
+
+            hard_max = AREA_HARD_MAXIMUMS.get("session", 1)
+            if area_res.requests_sent >= hard_max:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"area hard maximum ({hard_max}) reached"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return
+
+            # Attach session from vault
+            headers = dict(req.headers)
+            sess_sec = None
+            if self.vault and req.actor and "Cookie" not in headers and "Authorization" not in headers:
+                sess = self.vault.get_session(req.actor)
+                if sess.is_present("cookie"):
+                    cookie_sec = sess.get("cookie")
+                    if cookie_sec:
+                        headers["Cookie"] = cookie_sec.reveal_for_request()
+                        sess_sec = headers["Cookie"]
+                if sess.is_present("authorization"):
+                    auth_sec = sess.get("authorization")
+                    if auth_sec:
+                        headers["Authorization"] = auth_sec.reveal_for_request()
+                        if not sess_sec:
+                            sess_sec = headers["Authorization"]
+            elif "Cookie" in headers:
+                sess_sec = headers["Cookie"]
+            elif "Authorization" in headers:
+                sess_sec = headers["Authorization"]
+
+            req_to_send = PlannedRequest(
+                area=req.area,
+                check_id=req.check_id,
+                method=req.method,
+                path=req.path,
+                headers=headers,
+                body=req.body,
+                actor=req.actor,
+                expected=req.expected,
+                marker=req.marker,
+            )
+            effective_timeout = min(self.request_timeout, rem_area, rem_total)
+            req_res = self._execute_single_request(req_to_send, timeout=effective_timeout)
+            area_res.request_results.append(req_res)
+            result.all_request_results.append(req_res)
+            area_res.requests_sent += 1
+            result.requests_sent += 1
+
+            if req_res.timed_out:
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = req_res.error
+                area_res.reason = area_res.error or "S2 request timed out"
+                result.status = "INCOMPLETE"
+                return
+
+            if req_res.status == "INCOMPLETE":
+                area_res.status = "INCOMPLETE"
+                area_res.error = req_res.error
+                area_res.reason = area_res.error or "S2 request failed"
+                result.status = "INCOMPLETE"
+                return
+
+            resp = req_res.response
+            if resp is None:
+                area_res.status = "INCOMPLETE"
+                area_res.reason = "no response from S2 request"
+                return
+
+            if sess_sec is None and self.vault and req.actor:
+                sess_obj = self.vault.get_session(req.actor)
+                if sess_obj.is_present("cookie") and sess_obj.get("cookie"):
+                    sess_sec = sess_obj.get("cookie").reveal_for_request()
+                elif sess_obj.is_present("authorization") and sess_obj.get("authorization"):
+                    sess_sec = sess_obj.get("authorization").reveal_for_request()
+
+            from .auth import compute_fingerprint as _compute_fp
+            # S2 continuity fingerprint MUST represent the exact active session identity sent in the request,
+            # NOT derived from any new Set-Cookie, Authorization header, or token returned in the response.
+            fingerprint = _compute_fp(self._run_hmac_key, sess_sec)
+            marker_present = (req.marker in resp.body) if req.marker else False
+            status_class = f"{resp.status // 100}xx"
+
+            if 200 <= resp.status < 300 and marker_present:
+                classification = "allowed"
+            elif resp.status in deny_statuses and not marker_present:
+                classification = "denied"
+            elif 200 <= resp.status < 300 and not marker_present:
+                classification = "ambiguous"
+            else:
+                classification = "incomplete"
+
+            s2_check = {
+                "check": "S2",
+                "area": "session",
+                "actors": [req.actor or primary_user],
+                "method": req.method,
+                "path": req.path,
+                "expected": "allowed",
+                "status_class": status_class,
+                "status": resp.status,
+                "classification": classification,
+                "marker_present": marker_present,
+                "elapsed_ms": round(req_res.elapsed_ms, 1),
+                "fingerprint": fingerprint,
+            }
+
+        # Determine if HTTPS
+        is_https = cfg.base_url.startswith("https://")
+
+        # Evaluate S1-S6 using session module
+        checks, findings, status, reason = evaluate_session_checks(
+            auth_checks=auth_res.checks,
+            s2_check=s2_check,
+            vault=self.vault,
+            run_hmac_key=self._run_hmac_key,
+            is_https=is_https,
+            has_logout=has_logout,
+            pre_auth_fingerprints=self._pre_auth_fingerprints if self._pre_auth_fingerprints else None,
+        )
+
+        area_res.checks = checks
+        area_res.findings = findings
+        area_res.status = status
+        area_res.reason = reason
+        area_res.runtime_checks_executed = (
+            area_res.requests_sent == area_res.requests_planned
+            and status in ("PASS", "FAIL", "EXECUTED")
+        )
 
     def _mark_all_areas_incomplete(
         self, plan: NativePlan, result: NativeExecutionResult, reason: str
