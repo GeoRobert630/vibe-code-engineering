@@ -15,6 +15,12 @@ from .authz import (
     make_authz_finding,
 )
 from .eligibility import NativeEligibilityDecision, evaluate_native
+from .idor import (
+    IDOR_NAMESPACE,
+    build_idor_requests,
+    evaluate_idor_checks,
+    make_idor_finding,
+)
 from .executor import (
     AREA_HARD_MAXIMUMS,
     DEFAULT_REQUEST_TIMEOUT,
@@ -56,6 +62,7 @@ __all__ = [
     "AUTHZ_NAMESPACE",
     "DEFAULT_REQUEST_TIMEOUT",
     "FIXTURE_MAX_REQUESTS",
+    "IDOR_NAMESPACE",
     "LOCAL_APP_MAX_REQUESTS",
     "MAX_AREA_TIMEOUT",
     "MAX_TOTAL_TIMEOUT",
@@ -78,12 +85,14 @@ __all__ = [
     "SessionState",
     "build_auth_requests",
     "build_authz_requests",
+    "build_idor_requests",
     "build_plan",
     "build_session_requests",
     "build_setup_payload",
     "build_setup_request",
     "compute_fingerprint",
     "evaluate_authz_checks",
+    "evaluate_idor_checks",
     "evaluate_native",
     "evaluate_session_checks",
     "execute_native_plan",
@@ -92,6 +101,7 @@ __all__ = [
     "is_mfa_challenge",
     "make_auth_finding",
     "make_authz_finding",
+    "make_idor_finding",
     "make_session_finding",
     "parse_cookie_attributes",
     "validate_setup_response",

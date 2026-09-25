@@ -106,7 +106,11 @@ def build_plan(cfg: Config) -> NativePlan:
     owners = set(res.owner for res in rv.resources if res.owner)
     users_with_objects = [u for u in users if u in owners]
     if len(users_with_objects) >= 2:
-        plan.areas["idor_bola"] = AreaPlan(True, "", 4, 4)
+        from .idor import build_idor_requests
+
+        idor_requests = build_idor_requests(cfg)
+        count = len(idor_requests)
+        plan.areas["idor_bola"] = AreaPlan(True, "", count, 4, idor_requests)
     else:
         plan.areas["idor_bola"] = AreaPlan(False, "missing two user actors with declared objects")
 

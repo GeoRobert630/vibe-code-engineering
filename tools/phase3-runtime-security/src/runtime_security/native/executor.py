@@ -870,6 +870,20 @@ class NativeExecutor:
                 result.area_results[area_name] = area_res
                 continue
 
+            # If this is idor_bola verification with declared actors, run idor evaluation
+            # using authentication evidence. This enforces A3 prerequisites.
+            if area_name == "idor_bola" and any(r.actor is not None for r in requests_to_run):
+                self._execute_idor_area(
+                    area_plan=area_plan,
+                    area_res=area_res,
+                    start_total=start_total,
+                    area_start=area_start,
+                    result=result,
+                    plan=plan,
+                )
+                result.area_results[area_name] = area_res
+                continue
+
             # Execute requests for this area
             for req in requests_to_run:
                 now = time.monotonic()
@@ -941,10 +955,9 @@ class NativeExecutor:
         ]
         if any(ar.timed_out for ar in result.area_results.values()):
             result.timed_out = True
-            result.status = "INCOMPLETE"
-        elif any(ar.status == "FAIL" for ar in active_areas):
+        if any(ar.status == "FAIL" for ar in active_areas):
             result.status = "FAIL"
-        elif any(ar.status == "INCOMPLETE" for ar in active_areas):
+        elif any(ar.status == "INCOMPLETE" for ar in active_areas) or result.timed_out:
             result.status = "INCOMPLETE"
         elif active_areas and all(ar.status == "PASS" for ar in active_areas):
             result.status = "PASS"
@@ -1820,6 +1833,353 @@ class NativeExecutor:
         area_res.runtime_checks_executed = (
             area_res.requests_sent == area_res.requests_planned
             and status in ("PASS", "FAIL")
+        )
+
+    def _execute_idor_area(
+        self,
+        area_plan: AreaPlan,
+        area_res: AreaExecutionResult,
+        start_total: float,
+        area_start: float,
+        result: NativeExecutionResult,
+        plan: NativePlan,
+    ) -> None:
+        """Execute and evaluate horizontal IDOR/BOLA checks (I1-I4) deterministically (Design §11, §15, §16, §17).
+
+        I1: user_a own object positive control (expected allowed).
+        I2: user_a access to user_b object (expected denied).
+        I3: user_b own object positive control (expected allowed).
+        I4: user_b access to user_a object (expected denied).
+        """
+        cfg = self.cfg
+        deny_statuses = (
+            cfg.runtime_verification.deny_statuses
+            if cfg.runtime_verification and cfg.runtime_verification.deny_statuses
+            else frozenset({401, 403, 404})
+        )
+
+        # 1. Prerequisite: Authentication area must have executed successfully
+        auth_res = result.area_results.get("authentication")
+        if not auth_res or not auth_res.checks:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authentication area not executed; IDOR verification depends on authentication"
+            area_res.reason = area_res.error
+            return
+
+        if auth_res.status == "NOT VERIFIED":
+            area_res.status = "NOT VERIFIED"
+            area_res.error = "authentication area not verified (MFA/unsupported flow)"
+            area_res.reason = area_res.error
+            return
+
+        # 2. Identify I1, I2, I3, I4 requests from area_plan.requests
+        i1_req = next((r for r in area_plan.requests if r.check_id == "I1"), None)
+        i2_req = next((r for r in area_plan.requests if r.check_id == "I2"), None)
+        i3_req = next((r for r in area_plan.requests if r.check_id == "I3"), None)
+        i4_req = next((r for r in area_plan.requests if r.check_id == "I4"), None)
+
+        if not i1_req or not i2_req or not i3_req or not i4_req:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "IDOR requests (I1-I4) missing from plan"
+            area_res.reason = area_res.error
+            return
+
+        user_a = i1_req.actor
+        user_b = i3_req.actor
+        if not user_a or not user_b or user_a == user_b:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "two distinct user actors required for IDOR verification"
+            area_res.reason = area_res.error
+            return
+
+        # 3. Prerequisite: Both user_a and user_b must have succeeded in A3 positive control
+        user_a_a3_ok = any(
+            c.get("check") == "A3"
+            and user_a in c.get("actors", [])
+            and c.get("classification") == "allowed"
+            for c in auth_res.checks
+        )
+        user_b_a3_ok = any(
+            c.get("check") == "A3"
+            and user_b in c.get("actors", [])
+            and c.get("classification") == "allowed"
+            for c in auth_res.checks
+        )
+        if not user_a_a3_ok or not user_b_a3_ok:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authentication positive control (A3) not established for IDOR user actors"
+            area_res.reason = area_res.error
+            return
+
+        # Helper to attach actor session
+        def _attach_session(actor: str, headers_dict: dict[str, str]) -> None:
+            if self.vault:
+                sess = self.vault.get_session(actor)
+                if sess.is_present("cookie") and sess.get("cookie"):
+                    headers_dict["Cookie"] = sess.get("cookie").reveal_for_request()
+                if sess.is_present("authorization") and sess.get("authorization"):
+                    headers_dict["Authorization"] = sess.get("authorization").reveal_for_request()
+            if "Cookie" not in headers_dict and "Authorization" not in headers_dict:
+                old = self._saved_pre_logout_sessions.get(actor, {})
+                if old.get("cookie"):
+                    headers_dict["Cookie"] = old["cookie"]
+                if old.get("authorization"):
+                    headers_dict["Authorization"] = old["authorization"]
+
+        def _classify(req: PlannedRequest, resp: Response, other_req: PlannedRequest) -> tuple[str, bool]:
+            marker_present = (req.marker in resp.body) if req.marker else False
+            other_marker = other_req.marker
+            other_marker_present = (other_marker in resp.body) if other_marker else False
+
+            if other_marker_present:
+                return "ambiguous", marker_present
+            if 200 <= resp.status < 300 and marker_present:
+                return "allowed", marker_present
+            if resp.status in deny_statuses and not marker_present:
+                return "denied", marker_present
+            if 200 <= resp.status < 300 and not marker_present:
+                return "ambiguous", marker_present
+            if resp.status in (400, 405, 409, 422) or (300 <= resp.status < 400):
+                return "ambiguous", marker_present
+            if resp.status in deny_statuses and marker_present:
+                return "ambiguous", marker_present
+            return "incomplete", marker_present
+
+        hard_max = AREA_HARD_MAXIMUMS.get("idor_bola", 4)
+        executed_checks: list[dict[str, Any]] = []
+
+        # Helper to send a planned request with budget and timeout enforcement
+        def _run_req(planned_req: PlannedRequest, actor_for_session: str) -> tuple[RequestExecutionResult | None, str | None]:
+            now = time.monotonic()
+            rem_total = self.total_timeout - (now - start_total)
+            if rem_total <= 0:
+                result.timed_out = True
+                result.status = "INCOMPLETE"
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = "total run timeout exceeded (180s)"
+                area_res.reason = area_res.error
+                return None, "total_timeout"
+
+            rem_area = self.area_timeout - (now - area_start)
+            if rem_area <= 0:
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"area timeout exceeded ({self.area_timeout:.1f}s)"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return None, "area_timeout"
+
+            assert self.client is not None
+            if self.client.sent >= self.client.max_budget:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"total request budget ({self.client.max_budget}) exhausted"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return None, "total_budget"
+
+            if area_res.requests_sent >= hard_max:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"area hard maximum ({hard_max}) reached"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return None, "hard_max"
+
+            headers = dict(planned_req.headers)
+            _attach_session(actor_for_session, headers)
+
+            req_to_send = PlannedRequest(
+                area=planned_req.area,
+                check_id=planned_req.check_id,
+                method=planned_req.method,
+                path=planned_req.path,
+                headers=headers,
+                body=planned_req.body,
+                actor=planned_req.actor,
+                expected=planned_req.expected,
+                marker=planned_req.marker,
+            )
+            effective_timeout = min(self.request_timeout, rem_area, rem_total)
+            req_res = self._execute_single_request(req_to_send, timeout=effective_timeout)
+            area_res.request_results.append(req_res)
+            result.all_request_results.append(req_res)
+            area_res.requests_sent += 1
+            result.requests_sent += 1
+            return req_res, None
+
+        # 4. Execute I1: user_a positive control on object-a
+        req_res_i1, err = _run_req(i1_req, user_a)
+        if err or not req_res_i1 or req_res_i1.timed_out or req_res_i1.status == "INCOMPLETE" or req_res_i1.response is None:
+            area_res.status = "INCOMPLETE"
+            if req_res_i1 and req_res_i1.timed_out:
+                area_res.timed_out = True
+            area_res.error = (req_res_i1.error if req_res_i1 else None) or area_res.error or "I1 request failed"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        resp_i1 = req_res_i1.response
+        i1_class, i1_marker = _classify(i1_req, resp_i1, i3_req)
+        i1_check = {
+            "check": "I1",
+            "area": "idor_bola",
+            "actors": [user_a],
+            "method": i1_req.method,
+            "path": i1_req.path,
+            "expected": "allowed",
+            "status_class": f"{resp_i1.status // 100}xx",
+            "status": resp_i1.status,
+            "classification": i1_class,
+            "marker_present": i1_marker,
+            "elapsed_ms": round(req_res_i1.elapsed_ms, 1),
+            "fingerprint": None,
+        }
+        executed_checks.append(i1_check)
+
+        # GATING: If I1 positive control failed, stop immediately
+        if i1_class != "allowed":
+            area_res.checks = executed_checks
+            area_res.findings = []
+            area_res.status = "INCOMPLETE"
+            area_res.error = f"own-object positive control I1 failed (classification={i1_class})"
+            area_res.reason = area_res.error
+            return
+
+        # 5. Execute I2: user_a cross-actor access to object-b
+        req_res_i2, err = _run_req(i2_req, user_a)
+        if err or not req_res_i2 or req_res_i2.timed_out or req_res_i2.status == "INCOMPLETE" or req_res_i2.response is None:
+            area_res.status = "INCOMPLETE"
+            if req_res_i2 and req_res_i2.timed_out:
+                area_res.timed_out = True
+            area_res.checks = executed_checks
+            area_res.error = (req_res_i2.error if req_res_i2 else None) or area_res.error or "I2 request failed"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        resp_i2 = req_res_i2.response
+        i2_class, i2_marker = _classify(i2_req, resp_i2, i1_req)
+        i2_check = {
+            "check": "I2",
+            "area": "idor_bola",
+            "actors": [user_a],
+            "method": i2_req.method,
+            "path": i2_req.path,
+            "expected": "denied",
+            "status_class": f"{resp_i2.status // 100}xx",
+            "status": resp_i2.status,
+            "classification": i2_class,
+            "marker_present": i2_marker,
+            "elapsed_ms": round(req_res_i2.elapsed_ms, 1),
+            "fingerprint": None,
+        }
+        executed_checks.append(i2_check)
+
+        # 6. Execute I3: user_b positive control on object-b
+        req_res_i3, err = _run_req(i3_req, user_b)
+        if err or not req_res_i3 or req_res_i3.timed_out or req_res_i3.status == "INCOMPLETE" or req_res_i3.response is None:
+            area_res.status = "INCOMPLETE"
+            if req_res_i3 and req_res_i3.timed_out:
+                area_res.timed_out = True
+            area_res.checks = executed_checks
+            area_res.error = (req_res_i3.error if req_res_i3 else None) or area_res.error or "I3 request failed"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        resp_i3 = req_res_i3.response
+        i3_class, i3_marker = _classify(i3_req, resp_i3, i1_req)
+        i3_check = {
+            "check": "I3",
+            "area": "idor_bola",
+            "actors": [user_b],
+            "method": i3_req.method,
+            "path": i3_req.path,
+            "expected": "allowed",
+            "status_class": f"{resp_i3.status // 100}xx",
+            "status": resp_i3.status,
+            "classification": i3_class,
+            "marker_present": i3_marker,
+            "elapsed_ms": round(req_res_i3.elapsed_ms, 1),
+            "fingerprint": None,
+        }
+        executed_checks.append(i3_check)
+
+        # GATING: If I3 positive control failed, stop immediately and suppress any finding from I2
+        if i3_class != "allowed":
+            area_res.checks = executed_checks
+            area_res.findings = []
+            area_res.status = "INCOMPLETE"
+            area_res.error = f"own-object positive control I3 failed (classification={i3_class})"
+            area_res.reason = area_res.error
+            return
+
+        # 7. Execute I4: user_b cross-actor access to object-a
+        req_res_i4, err = _run_req(i4_req, user_b)
+        resp_i4 = req_res_i4.response if req_res_i4 else None
+
+        if resp_i4 is not None:
+            i4_class, i4_marker = _classify(i4_req, resp_i4, i3_req)
+            i4_status = resp_i4.status
+            i4_status_class = f"{resp_i4.status // 100}xx"
+        else:
+            i4_class = "incomplete"
+            i4_marker = False
+            i4_status = 0
+            i4_status_class = "0xx"
+
+        i4_check = {
+            "check": "I4",
+            "area": "idor_bola",
+            "actors": [user_b],
+            "method": i4_req.method,
+            "path": i4_req.path,
+            "expected": "denied",
+            "status_class": i4_status_class,
+            "status": i4_status,
+            "classification": i4_class,
+            "marker_present": i4_marker,
+            "elapsed_ms": round(req_res_i4.elapsed_ms, 1) if req_res_i4 else 0.0,
+            "fingerprint": None,
+        }
+        executed_checks.append(i4_check)
+
+        if req_res_i4 and req_res_i4.timed_out:
+            area_res.timed_out = True
+
+        # 8. Evaluate IDOR checks using idor module
+        from .idor import evaluate_idor_checks
+        checks, findings, status, reason = evaluate_idor_checks(
+            check_records=executed_checks,
+            user_a=user_a,
+            user_b=user_b,
+            res_a_path=i1_req.path,
+            res_b_path=i3_req.path,
+        )
+
+        area_res.checks = checks
+        area_res.findings = findings
+        area_res.status = status
+        area_res.reason = reason
+
+        i4_failed = bool(
+            err
+            or not req_res_i4
+            or req_res_i4.timed_out
+            or req_res_i4.status == "INCOMPLETE"
+            or resp_i4 is None
+        )
+        if i4_failed and status != "FAIL":
+            area_res.status = "INCOMPLETE"
+            area_res.error = (req_res_i4.error if req_res_i4 else None) or area_res.error or "I4 request failed"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+
+        area_res.runtime_checks_executed = (
+            area_res.requests_sent == area_res.requests_planned
+            and area_res.status in ("PASS", "FAIL")
         )
 
     def _mark_all_areas_incomplete(
