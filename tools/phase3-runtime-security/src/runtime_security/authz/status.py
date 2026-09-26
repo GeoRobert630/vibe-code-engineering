@@ -1,16 +1,14 @@
-"""Authorization area status (Phase 3C, status/reporting only).
+"""Authorization area status (Phase 3C reporting & imported results).
 
 Statuses: PASS, FAIL, NOT CONFIGURED, NOT VERIFIED, INCOMPLETE.
-This version never executes runtime authorization checks, so the status is NOT VERIFIED.
-The only way the area becomes FAIL is the presence of ``RT-AUTHZ-*`` findings in the
-report (reserved namespace for future imported results; none are generated here).
-This is a coverage status, not a security verdict.
+When native verification is active under runtime_verification, native execution
+results are populated by runtime_security.native.executor and runtime_security.native.authz.
+When imported verification is active under verification_results, this module populates
+statuses from the external imported evidence.
+Without native verification or imported results, the status remains NOT VERIFIED
+(a coverage status, not a security verdict).
 
-Sub-areas (reporting groundwork for docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md): ``authorization``,
-``idor_bola`` and ``tenant_isolation``. Each is always NOT VERIFIED in this version, with
-``runtime_checks_executed: false`` and ``credentials_read: false``. Their namespaces (``RT-AUTHZ-*``,
-``RT-IDOR-*``, ``RT-TENANT-*``) are reserved; no finding is generated for them, and a sub-area never
-becomes PASS or FAIL here.
+Sub-areas: authorization, idor_bola, and tenant_isolation.
 """
 
 from __future__ import annotations
