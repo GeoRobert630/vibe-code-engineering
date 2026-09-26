@@ -71,6 +71,45 @@ class AuthConfig:
     credentials: CredentialRefs | None
 
 
+@dataclass(frozen=True)
+class IdentitySetupConfig:
+    adapter: str
+    path: str
+
+
+@dataclass(frozen=True)
+class ActorConfig:
+    role: str
+    tenant: str | None = None
+
+
+@dataclass(frozen=True)
+class RouteConfig:
+    path: str
+    marker: str
+    roles: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class ResourceConfig:
+    id: str
+    path: str
+    marker: str
+    owner: str | None = None
+    tenant: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeVerificationConfig:
+    mode: str
+    allowed_targets: list[str]
+    identity_setup: IdentitySetupConfig | None
+    actors: dict[str, ActorConfig]
+    routes: dict[str, RouteConfig]
+    resources: list[ResourceConfig]
+    deny_statuses: frozenset[int]
+
+
 @dataclass
 class Config:
     base_url: str
@@ -97,6 +136,8 @@ class Config:
     zap_baseline: "ZapBaselineConfig | None" = None
     # Local JSON file with results produced by a separate, authorized test suite (never credentials).
     verification_results: str | None = None
+    runtime_verification: RuntimeVerificationConfig | None = None
+
 
     @property
     def scheme(self) -> str:
@@ -122,6 +163,7 @@ _ALLOWED = {
     "zap_baseline": {"enabled", "image", "spider_minutes", "timeout_seconds"},
     # Imported Authentication/Session/Authorization results (a file path only; no credentials, no requests).
     "verification_results": {"path"},
+    "runtime_verification": {"mode", "allowed_targets", "identity_setup", "actors", "routes", "resources", "deny_statuses"},
 }
 
 
@@ -232,7 +274,7 @@ def parse(data: Any, source_path: str | None = None) -> Config:
         if key in err and err[key] is not None:
             setattr(cfg, key, _check_path(str(err[key]), f"error_leakage.{key}"))
 
-    cfg.authentication = parse_authentication(data.get("authentication"), data.get("credentials"))
+    cfg.authentication = parse_authentication(data.get("authentication"), data.get("credentials"), "runtime_verification" in data)
     if "zap_baseline" in data:
         z = data["zap_baseline"]
         enabled = _bool(z.get("enabled", False), "zap_baseline.enabled")
@@ -254,6 +296,11 @@ def parse(data: Any, source_path: str | None = None) -> Config:
         if not p.is_absolute() and source_path:
             p = Path(source_path).resolve().parent / p
         cfg.verification_results = str(p)
+
+    if "runtime_verification" in data:
+        if "credentials" in data:
+            raise ConfigError("runtime_verification together with the legacy credentials section is a configuration error; they cannot be used together")
+        cfg.runtime_verification = parse_runtime_verification(data["runtime_verification"])
 
     limits = data.get("limits", {})
     if "timeout" in limits:
@@ -307,7 +354,103 @@ def _field_name(value: Any, key: str) -> str:
     return value
 
 
-def parse_authentication(auth: Any, creds: Any) -> AuthConfig | None:
+_CREDENTIAL_SHAPED = re.compile(
+    r"(password|secret|token|cookie|bearer|authorization|api_?key|session_?id|credentials|_env$)",
+    re.IGNORECASE
+)
+
+
+def _reject_credential_shaped_keys(value: Any) -> None:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, str) and _CREDENTIAL_SHAPED.search(k):
+                raise ConfigError(f"credential-shaped key found in runtime_verification: {k}")
+            _reject_credential_shaped_keys(v)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_credential_shaped_keys(item)
+
+
+def parse_runtime_verification(data: Any) -> RuntimeVerificationConfig | None:
+    if data is None:
+        return None
+
+    _reject_credential_shaped_keys(data)
+
+    mode = str(data.get("mode", ""))
+    if mode not in ("fixture", "local-app"):
+        raise ConfigError("runtime_verification.mode must be 'fixture' or 'local-app'")
+
+    allowed_targets = data.get("allowed_targets", [])
+    if not isinstance(allowed_targets, list) or not all(isinstance(t, str) for t in allowed_targets):
+        raise ConfigError("runtime_verification.allowed_targets must be a list of strings")
+
+    identity_setup = None
+    if "identity_setup" in data:
+        iso = _mapping(data["identity_setup"], "runtime_verification.identity_setup", {"adapter", "path"}, {"adapter", "path"})
+        if iso["adapter"] != "http-local":
+            raise ConfigError("runtime_verification.identity_setup.adapter must be 'http-local'")
+        identity_setup = IdentitySetupConfig(
+            adapter="http-local",
+            path=_check_path(str(iso["path"]), "runtime_verification.identity_setup.path")
+        )
+
+    actors = {}
+    if "actors" in data:
+        if not isinstance(data["actors"], dict):
+            raise ConfigError("runtime_verification.actors must be a mapping")
+        for lbl, acfg in data["actors"].items():
+            if not isinstance(lbl, str) or not re.match(r"^[a-z][a-z0-9_]{0,23}$", lbl):
+                raise ConfigError(f"invalid actor label: {lbl}")
+            acfg = _mapping(acfg, f"runtime_verification.actors.{lbl}", {"role", "tenant"}, {"role"})
+            if acfg["role"] not in ("user", "admin"):
+                raise ConfigError(f"runtime_verification.actors.{lbl}.role must be 'user' or 'admin'")
+            actors[lbl] = ActorConfig(role=acfg["role"], tenant=acfg.get("tenant"))
+
+    routes = {}
+    if "routes" in data:
+        if not isinstance(data["routes"], dict):
+            raise ConfigError("runtime_verification.routes must be a mapping")
+        for lbl, rcfg in data["routes"].items():
+            rcfg = _mapping(rcfg, f"runtime_verification.routes.{lbl}", {"path", "marker", "roles"}, {"path", "marker"})
+            roles = rcfg.get("roles")
+            if roles is not None and (not isinstance(roles, list) or not all(isinstance(r, str) for r in roles)):
+                raise ConfigError(f"runtime_verification.routes.{lbl}.roles must be a list of strings")
+            routes[lbl] = RouteConfig(
+                path=_check_path(str(rcfg["path"]), f"runtime_verification.routes.{lbl}.path"),
+                marker=str(rcfg["marker"]),
+                roles=list(roles) if roles is not None else None
+            )
+
+    resources = []
+    if "resources" in data:
+        if not isinstance(data["resources"], list):
+            raise ConfigError("runtime_verification.resources must be a list")
+        for i, res in enumerate(data["resources"]):
+            res = _mapping(res, f"runtime_verification.resources[{i}]", {"id", "path", "marker", "owner", "tenant"}, {"id", "path", "marker"})
+            resources.append(ResourceConfig(
+                id=str(res["id"]),
+                path=_check_path(str(res["path"]), f"runtime_verification.resources[{i}].path"),
+                marker=str(res["marker"]),
+                owner=res.get("owner"),
+                tenant=res.get("tenant")
+            ))
+
+    deny_statuses = data.get("deny_statuses", [])
+    if not isinstance(deny_statuses, list) or not all(isinstance(s, int) for s in deny_statuses):
+        raise ConfigError("runtime_verification.deny_statuses must be a list of integers")
+
+    return RuntimeVerificationConfig(
+        mode=mode,
+        allowed_targets=list(allowed_targets),
+        identity_setup=identity_setup,
+        actors=actors,
+        routes=routes,
+        resources=resources,
+        deny_statuses=frozenset(deny_statuses)
+    )
+
+def parse_authentication(auth: Any, creds: Any, has_runtime: bool = False) -> AuthConfig | None:
     if auth is None and creds is None:
         return None
     credentials = None
@@ -355,8 +498,11 @@ def parse_authentication(auth: Any, creds: Any) -> AuthConfig | None:
             method=_method(pe["method"], "authentication.protected_endpoint.method", PROTECTED_METHODS),
             path=_check_path(str(pe["path"]), "authentication.protected_endpoint.path"),
         )
-    if enabled and (login is None or protected is None or credentials is None):
-        raise ConfigError("authentication.enabled requires login, protected_endpoint and a credentials section")
+    if enabled and (login is None or protected is None or (credentials is None and not has_runtime)):
+        if has_runtime:
+            raise ConfigError("authentication.enabled requires login and protected_endpoint")
+        else:
+            raise ConfigError("authentication.enabled requires login, protected_endpoint and a credentials section")
     return AuthConfig(enabled, login, logout, protected, credentials)
 
 

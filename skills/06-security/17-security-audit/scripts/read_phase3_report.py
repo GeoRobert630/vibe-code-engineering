@@ -80,12 +80,17 @@ NOT_COVERED = [
     "authenticated sessions", "authorization", "IDOR/BOLA", "tenant isolation", "authenticated page behavior",
     "post-login cookies", "logout invalidation", "CSRF for authenticated flows", "authenticated API behavior",
 ]
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+try:
+    from runtime_security.verification.redaction import strict_clean
+except ImportError:
+    _pkg_dir = Path(__file__).resolve().parents[4] / "tools" / "phase3-runtime-security" / "src"
+    if _pkg_dir.is_dir() and str(_pkg_dir) not in sys.path:
+        sys.path.insert(0, str(_pkg_dir))
+    from runtime_security.verification.redaction import strict_clean
 
 
 def clean(value: object, limit: int = 300) -> str:
-    text = _CONTROL.sub("?", "" if value is None else str(value)).replace("\n", " ")
-    return text if len(text) <= limit else text[: limit - 3] + "..."
+    return strict_clean(value, limit)
 
 
 def load(path: Path) -> dict:

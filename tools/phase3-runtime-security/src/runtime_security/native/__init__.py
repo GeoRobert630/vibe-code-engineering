@@ -1,0 +1,118 @@
+"""Native verification module for Phase 3 runtime security."""
+
+from .auth import (
+    AUTH_NAMESPACE,
+    build_auth_requests,
+    compute_fingerprint,
+    extract_session,
+    is_mfa_challenge,
+    make_auth_finding,
+)
+from .authz import (
+    AUTHZ_NAMESPACE,
+    build_authz_requests,
+    evaluate_authz_checks,
+    make_authz_finding,
+)
+from .eligibility import NativeEligibilityDecision, evaluate_native
+from .idor import (
+    IDOR_NAMESPACE,
+    build_idor_requests,
+    evaluate_idor_checks,
+    make_idor_finding,
+)
+from .tenant import (
+    TENANT_NAMESPACE,
+    build_tenant_requests,
+    evaluate_tenant_checks,
+    make_tenant_finding,
+)
+from .executor import (
+    AREA_HARD_MAXIMUMS,
+    DEFAULT_REQUEST_TIMEOUT,
+    FIXTURE_MAX_REQUESTS,
+    LOCAL_APP_MAX_REQUESTS,
+    MAX_AREA_TIMEOUT,
+    MAX_TOTAL_TIMEOUT,
+    SETUP_MAX_REQUESTS,
+    VERIFICATION_AREAS,
+    AreaExecutionResult,
+    NativeExecutionResult,
+    NativeExecutor,
+    PlannedRequest,
+    RequestExecutionResult,
+    execute_native_plan,
+)
+from .identity import IdentityVault, SecretValue, SessionState
+from .plan import AreaPlan, NativePlan, build_plan
+from .session import (
+    SESSION_NAMESPACE,
+    build_session_requests,
+    evaluate_session_checks,
+    extract_all_cookie_attributes,
+    make_session_finding,
+    parse_cookie_attributes,
+)
+from .setup_adapter import (
+    SETUP_EXPIRES_IN_SECONDS,
+    SETUP_SCHEMA,
+    IdentitySetupResult,
+    build_setup_payload,
+    build_setup_request,
+    validate_setup_response,
+)
+
+__all__ = [
+    "AREA_HARD_MAXIMUMS",
+    "AUTH_NAMESPACE",
+    "AUTHZ_NAMESPACE",
+    "DEFAULT_REQUEST_TIMEOUT",
+    "FIXTURE_MAX_REQUESTS",
+    "IDOR_NAMESPACE",
+    "LOCAL_APP_MAX_REQUESTS",
+    "MAX_AREA_TIMEOUT",
+    "MAX_TOTAL_TIMEOUT",
+    "SESSION_NAMESPACE",
+    "SETUP_EXPIRES_IN_SECONDS",
+    "SETUP_MAX_REQUESTS",
+    "SETUP_SCHEMA",
+    "TENANT_NAMESPACE",
+    "VERIFICATION_AREAS",
+    "AreaExecutionResult",
+    "AreaPlan",
+    "IdentitySetupResult",
+    "IdentityVault",
+    "NativeEligibilityDecision",
+    "NativeExecutionResult",
+    "NativeExecutor",
+    "NativePlan",
+    "PlannedRequest",
+    "RequestExecutionResult",
+    "SecretValue",
+    "SessionState",
+    "build_auth_requests",
+    "build_authz_requests",
+    "build_idor_requests",
+    "build_plan",
+    "build_session_requests",
+    "build_setup_payload",
+    "build_setup_request",
+    "build_tenant_requests",
+    "compute_fingerprint",
+    "evaluate_authz_checks",
+    "evaluate_idor_checks",
+    "evaluate_native",
+    "evaluate_session_checks",
+    "evaluate_tenant_checks",
+    "execute_native_plan",
+    "extract_all_cookie_attributes",
+    "extract_session",
+    "is_mfa_challenge",
+    "make_auth_finding",
+    "make_authz_finding",
+    "make_idor_finding",
+    "make_session_finding",
+    "make_tenant_finding",
+    "parse_cookie_attributes",
+    "validate_setup_response",
+]

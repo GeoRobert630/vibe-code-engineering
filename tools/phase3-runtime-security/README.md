@@ -60,12 +60,11 @@ test suite can supply Authentication, Session, Authorization, IDOR/BOLA and Tena
   nothing changes: `verification_import` is NOT CONFIGURED and every area stays NOT VERIFIED.
 - **More detail.** See section 17 of the design document.
 
-**Not covered yet:** authentication, authorization, IDOR/BOLA, tenant isolation, CSRF, rate limiting,
-file access, webhooks, business logic. A possible future design for bounded authentication, session, authorization,
-IDOR/BOLA and tenant-isolation verification is in
-[docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md](../../docs/AUTH-SESSION-AUTHORIZATION-DESIGN.md). Runtime probing is not
-implemented; only the import of separately produced results (section 17) is. Without imported results these areas
-remain NOT VERIFIED.
+**Out of scope:** CSRF, rate limiting, file access, webhooks, and business logic.
+In v1.3, bounded runtime verification for authentication, session, authorization, IDOR/BOLA,
+and tenant isolation is implemented natively under `runtime_verification` for authorized local targets
+(see [docs/V1.3-AUTH-SESSION-AUTHORIZATION-DESIGN.md](../../docs/V1.3-AUTH-SESSION-AUTHORIZATION-DESIGN.md)).
+For external targets or applications tested via separate test suites, the v1.2 imported-results path remains supported.
 
 ## Install / run
 
