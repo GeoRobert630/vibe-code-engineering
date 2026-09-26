@@ -115,16 +115,20 @@ def build_plan(cfg: Config) -> NativePlan:
         plan.areas["idor_bola"] = AreaPlan(False, "missing two user actors with declared objects")
 
     # Tenant isolation
-    # One actor in each of two tenants
-    tenant_actors = {}
-    for a, acfg in actors.items():
+    # One actor in each of two tenants, each with a declared tenant resource
+    tenant_actors: dict[str, list[str]] = {}
+    for a, acfg in sorted(actors.items()):
         if acfg.tenant:
             tenant_actors.setdefault(acfg.tenant, []).append(a)
-            
+
     tenants_with_resources = set(res.tenant for res in rv.resources if res.tenant)
-    tenants_ready = [t for t, acts in tenant_actors.items() if t in tenants_with_resources and acts]
+    tenants_ready = [t for t in sorted(tenant_actors) if t in tenants_with_resources and tenant_actors[t]]
     if len(tenants_ready) >= 2:
-        plan.areas["tenant_isolation"] = AreaPlan(True, "", 4, 4)
+        from .tenant import build_tenant_requests
+
+        tenant_requests = build_tenant_requests(cfg)
+        count = len(tenant_requests)
+        plan.areas["tenant_isolation"] = AreaPlan(True, "", count, 4, tenant_requests)
     else:
         plan.areas["tenant_isolation"] = AreaPlan(False, "missing actors/resources in two distinct tenants")
 

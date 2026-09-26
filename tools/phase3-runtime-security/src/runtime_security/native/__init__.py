@@ -21,6 +21,12 @@ from .idor import (
     evaluate_idor_checks,
     make_idor_finding,
 )
+from .tenant import (
+    TENANT_NAMESPACE,
+    build_tenant_requests,
+    evaluate_tenant_checks,
+    make_tenant_finding,
+)
 from .executor import (
     AREA_HARD_MAXIMUMS,
     DEFAULT_REQUEST_TIMEOUT,
@@ -70,6 +76,7 @@ __all__ = [
     "SETUP_EXPIRES_IN_SECONDS",
     "SETUP_MAX_REQUESTS",
     "SETUP_SCHEMA",
+    "TENANT_NAMESPACE",
     "VERIFICATION_AREAS",
     "AreaExecutionResult",
     "AreaPlan",
@@ -90,11 +97,13 @@ __all__ = [
     "build_session_requests",
     "build_setup_payload",
     "build_setup_request",
+    "build_tenant_requests",
     "compute_fingerprint",
     "evaluate_authz_checks",
     "evaluate_idor_checks",
     "evaluate_native",
     "evaluate_session_checks",
+    "evaluate_tenant_checks",
     "execute_native_plan",
     "extract_all_cookie_attributes",
     "extract_session",
@@ -103,6 +112,7 @@ __all__ = [
     "make_authz_finding",
     "make_idor_finding",
     "make_session_finding",
+    "make_tenant_finding",
     "parse_cookie_attributes",
     "validate_setup_response",
 ]

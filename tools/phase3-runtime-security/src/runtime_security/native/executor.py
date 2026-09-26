@@ -884,6 +884,20 @@ class NativeExecutor:
                 result.area_results[area_name] = area_res
                 continue
 
+            # If this is tenant_isolation verification with declared actors, run tenant evaluation
+            # using authentication evidence. This enforces A3 prerequisites.
+            if area_name == "tenant_isolation" and any(r.actor is not None for r in requests_to_run):
+                self._execute_tenant_area(
+                    area_plan=area_plan,
+                    area_res=area_res,
+                    start_total=start_total,
+                    area_start=area_start,
+                    result=result,
+                    plan=plan,
+                )
+                result.area_results[area_name] = area_res
+                continue
+
             # Execute requests for this area
             for req in requests_to_run:
                 now = time.monotonic()
@@ -2174,6 +2188,366 @@ class NativeExecutor:
         if i4_failed and status != "FAIL":
             area_res.status = "INCOMPLETE"
             area_res.error = (req_res_i4.error if req_res_i4 else None) or area_res.error or "I4 request failed"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+
+        area_res.runtime_checks_executed = (
+            area_res.requests_sent == area_res.requests_planned
+            and area_res.status in ("PASS", "FAIL")
+        )
+
+    def _execute_tenant_area(
+        self,
+        area_plan: AreaPlan,
+        area_res: AreaExecutionResult,
+        start_total: float,
+        area_start: float,
+        result: NativeExecutionResult,
+        plan: NativePlan,
+    ) -> None:
+        """Execute and evaluate tenant isolation checks (T1-T4) deterministically (Design §12, §15, §16, §17).
+
+        T1: tenant-a actor own-tenant positive control (expected allowed).
+        T2: tenant-a actor access to tenant-b resource (expected denied).
+        T3: tenant-b actor own-tenant positive control (expected allowed).
+        T4: tenant-b actor access to tenant-a resource (expected denied).
+
+        Positive-control gating:
+        - T1 failure -> stop immediately; no T2/T3/T4; no finding.
+        - T3 failure -> suppress any T2 finding already observed; INCOMPLETE.
+        - RT-TENANT-001 only when T1 allowed AND T3 allowed AND (T2 allowed OR T4 allowed).
+        """
+        cfg = self.cfg
+        deny_statuses = (
+            cfg.runtime_verification.deny_statuses
+            if cfg.runtime_verification and cfg.runtime_verification.deny_statuses
+            else frozenset({401, 403, 404})
+        )
+
+        # 1. Prerequisite: Authentication area must have executed successfully
+        auth_res = result.area_results.get("authentication")
+        if not auth_res or not auth_res.checks:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authentication area not executed; tenant isolation verification depends on authentication"
+            area_res.reason = area_res.error
+            return
+
+        if auth_res.status == "NOT VERIFIED":
+            area_res.status = "NOT VERIFIED"
+            area_res.error = "authentication area not verified (MFA/unsupported flow)"
+            area_res.reason = area_res.error
+            return
+
+        # 2. Identify T1, T2, T3, T4 requests from area_plan.requests
+        t1_req = next((r for r in area_plan.requests if r.check_id == "T1"), None)
+        t2_req = next((r for r in area_plan.requests if r.check_id == "T2"), None)
+        t3_req = next((r for r in area_plan.requests if r.check_id == "T3"), None)
+        t4_req = next((r for r in area_plan.requests if r.check_id == "T4"), None)
+
+        if not t1_req or not t2_req or not t3_req or not t4_req:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "tenant isolation requests (T1-T4) missing from plan"
+            area_res.reason = area_res.error
+            return
+
+        actor_a = t1_req.actor  # tenant-a actor
+        actor_b = t3_req.actor  # tenant-b actor
+        if not actor_a or not actor_b or actor_a == actor_b:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "two distinct tenant actors required for tenant isolation verification"
+            area_res.reason = area_res.error
+            return
+
+        # 3. Prerequisite: Both actor_a and actor_b must have succeeded in A3 positive control
+        actor_a_a3_ok = any(
+            c.get("check") == "A3"
+            and actor_a in c.get("actors", [])
+            and c.get("classification") == "allowed"
+            for c in auth_res.checks
+        )
+        actor_b_a3_ok = any(
+            c.get("check") == "A3"
+            and actor_b in c.get("actors", [])
+            and c.get("classification") == "allowed"
+            for c in auth_res.checks
+        )
+        if not actor_a_a3_ok or not actor_b_a3_ok:
+            area_res.status = "INCOMPLETE"
+            area_res.error = "authentication positive control (A3) not established for tenant actors"
+            area_res.reason = area_res.error
+            return
+
+        # Helper to attach actor session credentials to request headers
+        def _attach_session(actor: str, headers_dict: dict[str, str]) -> None:
+            if self.vault:
+                sess = self.vault.get_session(actor)
+                if sess.is_present("cookie") and sess.get("cookie"):
+                    headers_dict["Cookie"] = sess.get("cookie").reveal_for_request()
+                if sess.is_present("authorization") and sess.get("authorization"):
+                    headers_dict["Authorization"] = sess.get("authorization").reveal_for_request()
+            if "Cookie" not in headers_dict and "Authorization" not in headers_dict:
+                old = self._saved_pre_logout_sessions.get(actor, {})
+                if old.get("cookie"):
+                    headers_dict["Cookie"] = old["cookie"]
+                if old.get("authorization"):
+                    headers_dict["Authorization"] = old["authorization"]
+
+        def _classify(req: PlannedRequest, resp: Response, other_req: PlannedRequest) -> tuple[str, bool]:
+            """Classify response per design §15 evidence model.
+
+            allowed:    2xx AND resource's declared marker present.
+            denied:     status in deny_statuses AND marker absent.
+            ambiguous:  2xx without marker, 3xx, 400/405/409/422, deny status with marker,
+                        or another resource's marker present.
+            incomplete: 5xx, timeout, connection error, budget exhausted.
+            """
+            marker_present = (req.marker in resp.body) if req.marker else False
+            other_marker = other_req.marker
+            other_marker_present = (other_marker in resp.body) if other_marker else False
+
+            if other_marker_present:
+                return "ambiguous", marker_present
+            if 200 <= resp.status < 300 and marker_present:
+                return "allowed", marker_present
+            if resp.status in deny_statuses and not marker_present:
+                return "denied", marker_present
+            if 200 <= resp.status < 300 and not marker_present:
+                return "ambiguous", marker_present
+            if resp.status in (400, 405, 409, 422) or (300 <= resp.status < 400):
+                return "ambiguous", marker_present
+            if resp.status in deny_statuses and marker_present:
+                return "ambiguous", marker_present
+            return "incomplete", marker_present
+
+        hard_max = AREA_HARD_MAXIMUMS.get("tenant_isolation", 4)
+        executed_checks: list[dict[str, Any]] = []
+
+        # Helper to send a planned request with budget and timeout enforcement
+        def _run_req(planned_req: PlannedRequest, actor_for_session: str) -> tuple[RequestExecutionResult | None, str | None]:
+            now = time.monotonic()
+            rem_total = self.total_timeout - (now - start_total)
+            if rem_total <= 0:
+                result.timed_out = True
+                result.status = "INCOMPLETE"
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = "total run timeout exceeded (180s)"
+                area_res.reason = area_res.error
+                return None, "total_timeout"
+
+            rem_area = self.area_timeout - (now - area_start)
+            if rem_area <= 0:
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"area timeout exceeded ({self.area_timeout:.1f}s)"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return None, "area_timeout"
+
+            assert self.client is not None
+            if self.client.sent >= self.client.max_budget:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"total request budget ({self.client.max_budget}) exhausted"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return None, "total_budget"
+
+            if area_res.requests_sent >= hard_max:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"area hard maximum ({hard_max}) reached"
+                area_res.reason = area_res.error
+                result.status = "INCOMPLETE"
+                return None, "hard_max"
+
+            headers = dict(planned_req.headers)
+            _attach_session(actor_for_session, headers)
+
+            req_to_send = PlannedRequest(
+                area=planned_req.area,
+                check_id=planned_req.check_id,
+                method=planned_req.method,
+                path=planned_req.path,
+                headers=headers,
+                body=planned_req.body,
+                actor=planned_req.actor,
+                expected=planned_req.expected,
+                marker=planned_req.marker,
+            )
+            effective_timeout = min(self.request_timeout, rem_area, rem_total)
+            req_res = self._execute_single_request(req_to_send, timeout=effective_timeout)
+            area_res.request_results.append(req_res)
+            result.all_request_results.append(req_res)
+            area_res.requests_sent += 1
+            result.requests_sent += 1
+            return req_res, None
+
+        # 4. Execute T1: tenant-a actor positive control on tenant-a resource
+        req_res_t1, err = _run_req(t1_req, actor_a)
+        if err or not req_res_t1 or req_res_t1.timed_out or req_res_t1.status == "INCOMPLETE" or req_res_t1.response is None:
+            area_res.status = "INCOMPLETE"
+            if req_res_t1 and req_res_t1.timed_out:
+                area_res.timed_out = True
+            area_res.error = (req_res_t1.error if req_res_t1 else None) or area_res.error or "T1 request failed"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        resp_t1 = req_res_t1.response
+        t1_class, t1_marker = _classify(t1_req, resp_t1, t3_req)
+        t1_check = {
+            "check": "T1",
+            "area": "tenant_isolation",
+            "actors": [actor_a],
+            "method": t1_req.method,
+            "path": t1_req.path,
+            "expected": "allowed",
+            "status_class": f"{resp_t1.status // 100}xx",
+            "status": resp_t1.status,
+            "classification": t1_class,
+            "marker_present": t1_marker,
+            "elapsed_ms": round(req_res_t1.elapsed_ms, 1),
+            "fingerprint": None,
+        }
+        executed_checks.append(t1_check)
+
+        # GATING: If T1 positive control failed, stop immediately (design §22)
+        if t1_class != "allowed":
+            area_res.checks = executed_checks
+            area_res.findings = []
+            area_res.status = "INCOMPLETE"
+            area_res.error = f"own-tenant positive control T1 failed (classification={t1_class})"
+            area_res.reason = area_res.error
+            return
+
+        # 5. Execute T2: tenant-a actor cross-tenant access to tenant-b resource
+        req_res_t2, err = _run_req(t2_req, actor_a)
+        if err or not req_res_t2 or req_res_t2.timed_out or req_res_t2.status == "INCOMPLETE" or req_res_t2.response is None:
+            area_res.status = "INCOMPLETE"
+            if req_res_t2 and req_res_t2.timed_out:
+                area_res.timed_out = True
+            area_res.checks = executed_checks
+            area_res.error = (req_res_t2.error if req_res_t2 else None) or area_res.error or "T2 request failed"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        resp_t2 = req_res_t2.response
+        t2_class, t2_marker = _classify(t2_req, resp_t2, t1_req)
+        t2_check = {
+            "check": "T2",
+            "area": "tenant_isolation",
+            "actors": [actor_a],
+            "method": t2_req.method,
+            "path": t2_req.path,
+            "expected": "denied",
+            "status_class": f"{resp_t2.status // 100}xx",
+            "status": resp_t2.status,
+            "classification": t2_class,
+            "marker_present": t2_marker,
+            "elapsed_ms": round(req_res_t2.elapsed_ms, 1),
+            "fingerprint": None,
+        }
+        executed_checks.append(t2_check)
+
+        # 6. Execute T3: tenant-b actor positive control on tenant-b resource
+        req_res_t3, err = _run_req(t3_req, actor_b)
+        if err or not req_res_t3 or req_res_t3.timed_out or req_res_t3.status == "INCOMPLETE" or req_res_t3.response is None:
+            area_res.status = "INCOMPLETE"
+            if req_res_t3 and req_res_t3.timed_out:
+                area_res.timed_out = True
+            area_res.checks = executed_checks
+            area_res.error = (req_res_t3.error if req_res_t3 else None) or area_res.error or "T3 request failed"
+            area_res.reason = area_res.error
+            result.status = "INCOMPLETE"
+            return
+
+        resp_t3 = req_res_t3.response
+        t3_class, t3_marker = _classify(t3_req, resp_t3, t1_req)
+        t3_check = {
+            "check": "T3",
+            "area": "tenant_isolation",
+            "actors": [actor_b],
+            "method": t3_req.method,
+            "path": t3_req.path,
+            "expected": "allowed",
+            "status_class": f"{resp_t3.status // 100}xx",
+            "status": resp_t3.status,
+            "classification": t3_class,
+            "marker_present": t3_marker,
+            "elapsed_ms": round(req_res_t3.elapsed_ms, 1),
+            "fingerprint": None,
+        }
+        executed_checks.append(t3_check)
+
+        # GATING: If T3 positive control failed, suppress any T2 finding and mark INCOMPLETE (design §22)
+        if t3_class != "allowed":
+            area_res.checks = executed_checks
+            area_res.findings = []
+            area_res.status = "INCOMPLETE"
+            area_res.error = f"own-tenant positive control T3 failed (classification={t3_class})"
+            area_res.reason = area_res.error
+            return
+
+        # 7. Execute T4: tenant-b actor cross-tenant access to tenant-a resource
+        req_res_t4, err = _run_req(t4_req, actor_b)
+        resp_t4 = req_res_t4.response if req_res_t4 else None
+
+        if resp_t4 is not None:
+            t4_class, t4_marker = _classify(t4_req, resp_t4, t3_req)
+            t4_status = resp_t4.status
+            t4_status_class = f"{resp_t4.status // 100}xx"
+        else:
+            t4_class = "incomplete"
+            t4_marker = False
+            t4_status = 0
+            t4_status_class = "0xx"
+
+        t4_check = {
+            "check": "T4",
+            "area": "tenant_isolation",
+            "actors": [actor_b],
+            "method": t4_req.method,
+            "path": t4_req.path,
+            "expected": "denied",
+            "status_class": t4_status_class,
+            "status": t4_status,
+            "classification": t4_class,
+            "marker_present": t4_marker,
+            "elapsed_ms": round(req_res_t4.elapsed_ms, 1) if req_res_t4 else 0.0,
+            "fingerprint": None,
+        }
+        executed_checks.append(t4_check)
+
+        if req_res_t4 and req_res_t4.timed_out:
+            area_res.timed_out = True
+
+        # 8. Evaluate tenant isolation checks using tenant module
+        from .tenant import evaluate_tenant_checks
+        checks, findings, status, reason = evaluate_tenant_checks(
+            check_records=executed_checks,
+            actor_a=actor_a,
+            actor_b=actor_b,
+            res_a_path=t1_req.path,
+            res_b_path=t3_req.path,
+        )
+
+        area_res.checks = checks
+        area_res.findings = findings
+        area_res.status = status
+        area_res.reason = reason
+
+        t4_failed = bool(
+            err
+            or not req_res_t4
+            or (req_res_t4 and req_res_t4.timed_out)
+            or (req_res_t4 and req_res_t4.status == "INCOMPLETE")
+            or resp_t4 is None
+        )
+        if t4_failed and status != "FAIL":
+            area_res.status = "INCOMPLETE"
+            area_res.error = (req_res_t4.error if req_res_t4 else None) or area_res.error or "T4 request failed"
             area_res.reason = area_res.error
             result.status = "INCOMPLETE"
 
