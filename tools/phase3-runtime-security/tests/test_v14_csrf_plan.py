@@ -32,10 +32,7 @@ import pytest
 from runtime_security.config import parse
 from runtime_security.native.plan import build_plan
 
-pending_plan = pytest.mark.xfail(
-    strict=True,
-    reason="v1.4 design contract: CSRF plan generation and budget bounds pending in plan.py",
-)
+pending_plan = lambda f: f
 
 BASE_AUTH = {
     "enabled": True,

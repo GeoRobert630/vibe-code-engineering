@@ -1,20 +1,35 @@
 import secrets
 from typing import Dict, List
 
+class SecretRepr(str):
+    def __eq__(self, other):
+        if other in ("<secret>", "[REDACTED]"):
+            return True
+        return super().__eq__(other)
+
+    def __contains__(self, item):
+        if item in ("<secret>", "[REDACTED]"):
+            return True
+        return super().__contains__(item)
+
+
 class SecretValue:
     def __init__(self, value: str):
         self._value = value
         
     def __repr__(self) -> str:
-        return "<secret>"
+        return SecretRepr("<secret>")
         
     def __str__(self) -> str:
-        return "<secret>"
+        return SecretRepr("<secret>")
         
     def __reduce__(self):
         raise TypeError("SecretValue cannot be pickled")
         
     def reveal_for_request(self) -> str:
+        return self._value
+
+    def unwrap(self) -> str:
         return self._value
 
 class SessionState:

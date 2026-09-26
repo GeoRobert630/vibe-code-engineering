@@ -660,6 +660,8 @@ jobs:
           SOURCE_VALUES = {"native", "imported", "none"}
           v_src = {"authentication": "none", "session": "none", "authorization": "none"}
           v_sub_src = {"authorization": "none", "idor_bola": "none", "tenant_isolation": "none"}
+          has_csrf = bool(e("CSRF") or e("CSRF_SOURCE"))
+          csrf_src = None
           rep_path = security.get("runtime_report_path")
           if rep_path and os.path.isfile(rep_path):
               try:
@@ -670,6 +672,11 @@ jobs:
                       src = (auth_rep.get(a_key) or {}).get("source")
                       if src in ("native", "imported"):
                           v_src[a_key] = src
+                  if "csrf" in auth_rep:
+                      has_csrf = True
+                      c_src = (auth_rep.get("csrf") or {}).get("source")
+                      if c_src in ("native", "imported"):
+                          csrf_src = c_src
                   az_rep = rdata.get("authorization") or {}
                   subs_rep = az_rep.get("subareas") or {}
                   for s_key in ("authorization", "idor_bola", "tenant_isolation"):
@@ -687,6 +694,11 @@ jobs:
               env_s = e(f"{k.upper()}_SOURCE")
               if env_s in ("native", "imported"):
                   v_src[k] = env_s
+          env_csrf_s = e("CSRF_SOURCE")
+          if env_csrf_s in ("native", "imported", "none"):
+              csrf_src = env_csrf_s
+          if has_csrf:
+              v_src["csrf"] = csrf_src if csrf_src in SOURCE_VALUES else "none"
           for k in ("authorization", "idor_bola", "tenant_isolation"):
               env_s = e(f"SUBAREA_{k.upper()}_SOURCE")
               if env_s in ("native", "imported"):
@@ -723,6 +735,7 @@ jobs:
               fh.write(f"performance_status={performance['status']}\nperformance_gate={performance['gate_result']}\n")
               for k, v in verification.items():
                   fh.write(f"{k}={v}\n")
+          csrf_md = f" CSRF: {e('CSRF') or 'NOT VERIFIED'} ({v_src['csrf']})." if has_csrf else ""
           lines = [
               f"## Engineering CI: {overall}", "",
               "| Pipeline | Status | Gate |", "|---|---|---|",
@@ -733,7 +746,7 @@ jobs:
               f"Final enforcement: {overall}" + ("" if enforced else " (not enforced: enforce=false)"), "",
               f"Performance timing reliability: {performance['timing_reliability']}.",
               f"Phase 3 runtime: {runtime}. Authentication: {verification['authentication']} ({v_src['authentication']}). "
-              f"Session: {verification['session']} ({v_src['session']}). Authorization: {verification['authorization']} ({v_src['authorization']}).", "",
+              f"Session: {verification['session']} ({v_src['session']}). Authorization: {verification['authorization']} ({v_src['authorization']}).{csrf_md}", "",
               "_A combined PASS does not mean every verification area is complete._",
           ]
           if e("GITHUB_STEP_SUMMARY"):

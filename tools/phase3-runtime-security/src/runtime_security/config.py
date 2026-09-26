@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import json
 import re
 
 import yaml
@@ -40,6 +41,7 @@ LOGIN_CONTENT_TYPES = frozenset({"application/json", "application/x-www-form-url
 class EndpointConfig:
     method: str
     path: str
+    auth_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,45 @@ class ResourceConfig:
     tenant: str | None = None
 
 
+CSRF_MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH"})
+CSRF_FORBIDDEN_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
+CSRF_STRATEGIES = frozenset({"token", "origin_only", "both"})
+CSRF_TOKEN_SOURCES = frozenset({"none", "session_cookie", "prefetch", "page_body"})
+CSRF_TOKEN_LOCATIONS = frozenset({"header", "form", "json", "double_submit_cookie"})
+
+
+@dataclass(frozen=True)
+class CsrfSessionSetupConfig:
+    path: str
+    method: str = "POST"
+
+
+@dataclass(frozen=True)
+class CsrfCleanupConfig:
+    method: str = "POST"
+    body: str = ""
+    path: str | None = None
+
+
+@dataclass(frozen=True)
+class CsrfVerificationConfig:
+    path: str
+    method: str = "POST"
+    marker: str = ""
+    content_type: str = "json"
+    body: str = ""
+    token_strategy: str = "token"
+    token_source: str = "none"
+    token_source_path: str | None = None
+    token_source_marker: str | None = None
+    token_source_name: str | None = None
+    token_location: str = "header"
+    token_name: str = "X-CSRF-Token"
+    origin_validation: bool = False
+    session_setup: CsrfSessionSetupConfig | None = None
+    cleanup: CsrfCleanupConfig | None = None
+
+
 @dataclass(frozen=True)
 class RuntimeVerificationConfig:
     mode: str
@@ -108,6 +149,7 @@ class RuntimeVerificationConfig:
     routes: dict[str, RouteConfig]
     resources: list[ResourceConfig]
     deny_statuses: frozenset[int]
+    csrf: CsrfVerificationConfig | None = None
 
 
 @dataclass
@@ -163,7 +205,7 @@ _ALLOWED = {
     "zap_baseline": {"enabled", "image", "spider_minutes", "timeout_seconds"},
     # Imported Authentication/Session/Authorization results (a file path only; no credentials, no requests).
     "verification_results": {"path"},
-    "runtime_verification": {"mode", "allowed_targets", "identity_setup", "actors", "routes", "resources", "deny_statuses"},
+    "runtime_verification": {"mode", "allowed_targets", "identity_setup", "actors", "routes", "resources", "deny_statuses", "csrf"},
 }
 
 
@@ -274,7 +316,8 @@ def parse(data: Any, source_path: str | None = None) -> Config:
         if key in err and err[key] is not None:
             setattr(cfg, key, _check_path(str(err[key]), f"error_leakage.{key}"))
 
-    cfg.authentication = parse_authentication(data.get("authentication"), data.get("credentials"), "runtime_verification" in data)
+    has_csrf = bool(data.get("runtime_verification", {}).get("csrf")) if isinstance(data.get("runtime_verification"), dict) else False
+    cfg.authentication = parse_authentication(data.get("authentication"), data.get("credentials"), "runtime_verification" in data, has_csrf=has_csrf)
     if "zap_baseline" in data:
         z = data["zap_baseline"]
         enabled = _bool(z.get("enabled", False), "zap_baseline.enabled")
@@ -301,6 +344,17 @@ def parse(data: Any, source_path: str | None = None) -> Config:
         if "credentials" in data:
             raise ConfigError("runtime_verification together with the legacy credentials section is a configuration error; they cannot be used together")
         cfg.runtime_verification = parse_runtime_verification(data["runtime_verification"])
+        if cfg.runtime_verification and cfg.runtime_verification.csrf and cfg.verification_results:
+            try:
+                vr_path = Path(cfg.verification_results)
+                if vr_path.is_file():
+                    vr_data = json.loads(vr_path.read_text(encoding="utf-8"))
+                    if isinstance(vr_data, dict) and "csrf" in vr_data.get("areas", {}):
+                        raise ConfigError("native csrf verification and imported csrf results conflict; they are mutually exclusive")
+            except ConfigError:
+                raise
+            except (json.JSONDecodeError, OSError):
+                pass
 
     limits = data.get("limits", {})
     if "timeout" in limits:
@@ -360,15 +414,25 @@ _CREDENTIAL_SHAPED = re.compile(
 )
 
 
-def _reject_credential_shaped_keys(value: Any) -> None:
+CSRF_ALLOWED_CONFIG_KEYS = frozenset({
+    "path", "method", "marker", "content_type", "body", "token_strategy",
+    "token_source", "token_source_path", "token_source_marker", "token_source_name",
+    "token_location", "token_name", "origin_validation", "session_setup", "cleanup",
+})
+
+
+def _reject_credential_shaped_keys(value: Any, parent_key: str = "") -> None:
     if isinstance(value, dict):
         for k, v in value.items():
+            if parent_key == "csrf" and k in CSRF_ALLOWED_CONFIG_KEYS:
+                _reject_credential_shaped_keys(v, parent_key=k)
+                continue
             if isinstance(k, str) and _CREDENTIAL_SHAPED.search(k):
                 raise ConfigError(f"credential-shaped key found in runtime_verification: {k}")
-            _reject_credential_shaped_keys(v)
+            _reject_credential_shaped_keys(v, parent_key=k)
     elif isinstance(value, list):
         for item in value:
-            _reject_credential_shaped_keys(item)
+            _reject_credential_shaped_keys(item, parent_key=parent_key)
 
 
 def parse_runtime_verification(data: Any) -> RuntimeVerificationConfig | None:
@@ -440,6 +504,93 @@ def parse_runtime_verification(data: Any) -> RuntimeVerificationConfig | None:
     if not isinstance(deny_statuses, list) or not all(isinstance(s, int) for s in deny_statuses):
         raise ConfigError("runtime_verification.deny_statuses must be a list of integers")
 
+    csrf = None
+    if "csrf" in data:
+        raw_csrf = data["csrf"]
+        if not isinstance(raw_csrf, dict):
+            raise ConfigError("runtime_verification.csrf must be a mapping")
+
+        for k in raw_csrf:
+            if k in ("password", "secret", "bearer", "api_key", "raw_token"):
+                raise ConfigError(f"credential-shaped key {k!r} not accepted in csrf configuration")
+
+        allowed_csrf_keys = {
+            "path", "method", "marker", "content_type", "body", "token_strategy",
+            "token_source", "token_source_path", "token_source_marker", "token_source_name",
+            "token_location", "token_name", "origin_validation", "session_setup", "cleanup",
+        }
+        unknown_csrf = set(raw_csrf) - allowed_csrf_keys
+        if unknown_csrf:
+            raise ConfigError("unknown keys in csrf: " + ", ".join(sorted(unknown_csrf)))
+
+        if "path" not in raw_csrf:
+            raise ConfigError("csrf.path is required")
+        path_str = str(raw_csrf["path"])
+        if "://" in path_str or not path_str.startswith("/") or path_str.startswith("//"):
+            raise ConfigError(f"csrf.path: path must be relative starting with '/' (got {path_str!r})")
+        _check_path(path_str, "csrf.path")
+
+        method_str = str(raw_csrf.get("method", "POST")).upper()
+        if method_str in CSRF_FORBIDDEN_METHODS or method_str not in CSRF_MUTATION_METHODS:
+            raise ConfigError(f"csrf.method: method {method_str!r} is forbidden or unsupported")
+
+        strat_str = str(raw_csrf.get("token_strategy", "token"))
+        if strat_str not in CSRF_STRATEGIES:
+            raise ConfigError(f"csrf.token_strategy: invalid token_strategy {strat_str!r}")
+
+        src_str = str(raw_csrf.get("token_source", "none"))
+        if src_str not in CSRF_TOKEN_SOURCES:
+            raise ConfigError(f"csrf.token_source: invalid token_source {src_str!r}")
+
+        loc_str = str(raw_csrf.get("token_location", "header"))
+        if loc_str not in CSRF_TOKEN_LOCATIONS:
+            raise ConfigError(f"csrf.token_location: invalid token_location {loc_str!r}")
+
+        session_setup = None
+        if "session_setup" in raw_csrf:
+            ss = raw_csrf["session_setup"]
+            if not isinstance(ss, dict):
+                raise ConfigError("csrf.session_setup must be a mapping")
+            ss_path = _check_path(str(ss.get("path", "")), "csrf.session_setup.path")
+            ss_method = str(ss.get("method", "POST")).upper()
+            if ss_method not in LOGIN_METHODS:
+                raise ConfigError(f"csrf.session_setup.method must be in {sorted(LOGIN_METHODS)}")
+            session_setup = CsrfSessionSetupConfig(path=ss_path, method=ss_method)
+
+        cleanup = None
+        if "cleanup" in raw_csrf:
+            cl = raw_csrf["cleanup"]
+            if not isinstance(cl, dict):
+                raise ConfigError("csrf.cleanup must be a mapping")
+            cl_method = str(cl.get("method", "POST")).upper()
+            if cl_method not in CSRF_MUTATION_METHODS:
+                raise ConfigError(f"csrf.cleanup.method must be in {sorted(CSRF_MUTATION_METHODS)}")
+            cl_path = _check_path(str(cl["path"]), "csrf.cleanup.path") if "path" in cl else None
+            cl_body = str(cl.get("body", ""))
+            cleanup = CsrfCleanupConfig(method=cl_method, body=cl_body, path=cl_path)
+
+        ts_path = None
+        if raw_csrf.get("token_source_path") is not None:
+            ts_path = _check_path(str(raw_csrf["token_source_path"]), "csrf.token_source_path")
+
+        csrf = CsrfVerificationConfig(
+            path=path_str,
+            method=method_str,
+            marker=str(raw_csrf.get("marker", "")),
+            content_type=str(raw_csrf.get("content_type", "json")),
+            body=str(raw_csrf.get("body", "")),
+            token_strategy=strat_str,
+            token_source=src_str,
+            token_source_path=ts_path,
+            token_source_marker=str(raw_csrf["token_source_marker"]) if raw_csrf.get("token_source_marker") is not None else None,
+            token_source_name=str(raw_csrf["token_source_name"]) if raw_csrf.get("token_source_name") is not None else None,
+            token_location=loc_str,
+            token_name=str(raw_csrf.get("token_name", "X-CSRF-Token")),
+            origin_validation=bool(raw_csrf.get("origin_validation", False)),
+            session_setup=session_setup,
+            cleanup=cleanup,
+        )
+
     return RuntimeVerificationConfig(
         mode=mode,
         allowed_targets=list(allowed_targets),
@@ -447,10 +598,11 @@ def parse_runtime_verification(data: Any) -> RuntimeVerificationConfig | None:
         actors=actors,
         routes=routes,
         resources=resources,
-        deny_statuses=frozenset(deny_statuses)
+        deny_statuses=frozenset(deny_statuses),
+        csrf=csrf,
     )
 
-def parse_authentication(auth: Any, creds: Any, has_runtime: bool = False) -> AuthConfig | None:
+def parse_authentication(auth: Any, creds: Any, has_runtime: bool = False, has_csrf: bool = False) -> AuthConfig | None:
     if auth is None and creds is None:
         return None
     credentials = None
@@ -467,9 +619,10 @@ def parse_authentication(auth: Any, creds: Any, has_runtime: bool = False) -> Au
 
     login = None
     if "login" in a:
+        req_keys = {"method", "path"} if has_csrf else {"method", "path", "username_field", "password_field"}
         lg = _mapping(a["login"], "authentication.login",
                       {"method", "path", "content_type", "username_field", "password_field"},
-                      {"method", "path", "username_field", "password_field"})
+                      req_keys)
         ctype = lg.get("content_type", "application/json")
         if ctype not in LOGIN_CONTENT_TYPES:
             raise ConfigError(f"authentication.login.content_type must be one of {sorted(LOGIN_CONTENT_TYPES)}")
@@ -477,8 +630,8 @@ def parse_authentication(auth: Any, creds: Any, has_runtime: bool = False) -> Au
             method=_method(lg["method"], "authentication.login.method", LOGIN_METHODS),
             path=_check_path(str(lg["path"]), "authentication.login.path"),
             content_type=ctype,
-            username_field=_field_name(lg["username_field"], "authentication.login.username_field"),
-            password_field=_field_name(lg["password_field"], "authentication.login.password_field"),
+            username_field=_field_name(lg.get("username_field", "email"), "authentication.login.username_field"),
+            password_field=_field_name(lg.get("password_field", "password"), "authentication.login.password_field"),
         )
     logout = None
     if "logout" in a:
@@ -493,12 +646,13 @@ def parse_authentication(auth: Any, creds: Any, has_runtime: bool = False) -> Au
         )
     protected = None
     if "protected_endpoint" in a:
-        pe = _mapping(a["protected_endpoint"], "authentication.protected_endpoint", {"method", "path"}, {"method", "path"})
+        pe = _mapping(a["protected_endpoint"], "authentication.protected_endpoint", {"method", "path", "auth_type"}, {"method", "path"})
         protected = EndpointConfig(
             method=_method(pe["method"], "authentication.protected_endpoint.method", PROTECTED_METHODS),
             path=_check_path(str(pe["path"]), "authentication.protected_endpoint.path"),
+            auth_type=pe.get("auth_type"),
         )
-    if enabled and (login is None or protected is None or (credentials is None and not has_runtime)):
+    if enabled and (login is None or (protected is None and not has_csrf) or (credentials is None and not has_runtime)):
         if has_runtime:
             raise ConfigError("authentication.enabled requires login and protected_endpoint")
         else:

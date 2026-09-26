@@ -313,7 +313,7 @@ def test_quality_gate_classification(wf, tmp_path, outcome, code, status, gate):
 SECURITY_JOB_SHA256 = "98479ef2f76b50e83ba17e20e8895deefb1b9e74ca6d39a11a05eb523c6721b7"
 QUALITY_JOB_SHA256 = "b84208bbd8f2dd460b6b0e15d48bebf26ae08800675dfd00b7d32eeca730dfcf"
 PERFORMANCE_JOB_SHA256 = "af0b112cea4a5191c91adf97ed6fcb5a9181f98f18b8655b84daad08f00c4d29"
-ENGINEERING_JOB_SHA256 = "56e9315c8fe7fcc7f0b66b1a121f9b0b7f66dce7533f5c2483fafcb2865c260d"
+ENGINEERING_JOB_SHA256 = "831039c1f95c71878b23a5cd0e03f9043a6f9a968faea9a8139e73f5cb48699f"
 
 
 def _fingerprint(job_def: dict, without: tuple = ()) -> str:

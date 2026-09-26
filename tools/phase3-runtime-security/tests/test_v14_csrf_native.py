@@ -62,10 +62,7 @@ from runtime_security.native.executor import execute_native_plan
 from runtime_security.native.identity import SecretValue
 from runtime_security.native.plan import build_plan
 
-pending_csrf = pytest.mark.xfail(
-    strict=True,
-    reason="v1.4 design contract: Native CSRF execution layer pending implementation in native/csrf.py",
-)
+pending_csrf = lambda f: f
 
 BASE_AUTH = {
     "enabled": True,

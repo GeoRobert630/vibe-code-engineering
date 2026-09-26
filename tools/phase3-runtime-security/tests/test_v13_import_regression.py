@@ -120,7 +120,7 @@ def test_mixed_source_metadata_does_not_change_imported_only_flow(tmp_path):
 
 
 @pytest.mark.parametrize("mutate, match", [
-    (lambda d: d.update(schema_version="1.1"), "schema_version"),
+    (lambda d: d.update(schema_version="1.2"), "schema_version"),
     (lambda d: d["areas"]["session"].update(requests_count=21), "request budget"),
     (lambda d: d["areas"]["idor_bola"]["findings"][0].update(id="RT-TENANT-001"), "namespace"),
     (lambda d: d["areas"]["session"].update(token="x"), "credential-shaped"),

@@ -32,10 +32,7 @@ import pytest
 from runtime_security.verification import importer
 from runtime_security.verification.importer import ImportRejected, validate
 
-pending_schema11 = pytest.mark.xfail(
-    strict=True,
-    reason="v1.4 design contract: Schema 1.1 and CSRF imported area pending in verification/importer.py",
-)
+pending_schema11 = lambda f: f
 
 FIX = Path(__file__).parent / "fixtures" / "verification"
 BASE = "http://127.0.0.1:3000"
@@ -162,6 +159,9 @@ def test_schema_11_allows_up_to_27_total_requests():
     """Schema 1.1 raises total imported request budget from 20 to 27."""
     doc = valid_10_doc()
     doc["schema_version"] = "1.1"
+    for area in ("authorization", "idor_bola", "tenant_isolation"):
+        if area in doc.get("areas", {}):
+            doc["areas"][area]["requests_count"] = 0
     # Set total to 25 (valid for 1.1, invalid for 1.0)
     doc["areas"]["authentication"]["requests_count"] = 10
     doc["areas"]["session"]["requests_count"] = 8
@@ -172,7 +172,7 @@ def test_schema_11_allows_up_to_27_total_requests():
         "findings": [],
         "evidence": [],
     }
-    # Total = 10 + 8 + 7 = 25 <= 27
+    # Total = 10 + 8 + 7 + 0 + 0 + 0 = 25 <= 27
     r = validate(doc, BASE)
     assert r.usable
     assert r.requests_count == 25

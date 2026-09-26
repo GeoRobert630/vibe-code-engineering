@@ -27,10 +27,8 @@ if _TESTS not in sys.path:
 import pytest
 from runtime_security.config import ConfigError, parse
 
-pending_config = pytest.mark.xfail(
-    strict=True,
-    reason="v1.4 design contract: CSRF configuration parsing pending in config.py",
-)
+# pending_config is now resolved by v1.4 implementation
+pending_config = lambda f: f
 
 BASE_TARGET = {
     "base_url": "http://127.0.0.1:3000",

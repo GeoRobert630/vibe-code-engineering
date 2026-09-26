@@ -26,7 +26,7 @@ SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFORMATIONAL")
 ACTIVE = {"OPEN", "REQUIRES_REVIEW"}
 MAX_REPORT_BYTES = 50 * 1024 * 1024
 P2_ID = re.compile(r"^P2-[0-9a-f]{12}$")
-RT_ID = re.compile(r"^RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ|IDOR|TENANT)-\d{3}$")
+RT_ID = re.compile(r"^RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ|IDOR|TENANT|CSRF)-\d{3}$")
 AI_ID = re.compile(r"^AI-[A-Za-z0-9_-]{1,40}$")
 # Status vocabulary of imported verification results; PASS/EXECUTED need runtime_checks_executed=true.
 VERIFICATION_STATUSES = ("NOT CONFIGURED", "READY", "EXECUTED", "PASS", "FAIL", "INCOMPLETE", "NOT VERIFIED")
@@ -206,7 +206,9 @@ def load_phase3(path: Path, bundle: Bundle) -> None:
     zb = data.get("zap_baseline") or {}
     if zb.get("enabled") and zb.get("executed") and zb.get("exit_code") not in (0, 1, 2):
         bundle.incomplete.append("zap-baseline")
-    for key, label in (("authentication", "Authentication"), ("session", "Session")):
+    for key, label in (("authentication", "Authentication"), ("session", "Session"), ("csrf", "CSRF")):
+        if key == "csrf" and key not in (data.get("auth_areas") or {}):
+            continue
         area = (data.get("auth_areas") or {}).get(key) or {}
         area = area if isinstance(area, dict) else {}
         bundle.verification[label] = _coverage_status(area, VERIFICATION_STATUSES + ("NOT APPLICABLE",), ("PASS", "EXECUTED"))
@@ -240,6 +242,11 @@ def load_phase3(path: Path, bundle: Bundle) -> None:
         bundle.native_verification = {"status": nstatus, "requestsCount": count}
         if nstatus == "INCOMPLETE":
             bundle.incomplete.append("phase3 native verification")
+    for inc in data.get("incomplete") or []:
+        if isinstance(inc, str) and inc not in bundle.incomplete:
+            bundle.incomplete.append(clean(inc, 100))
+    if bundle.verification.get("CSRF") == "INCOMPLETE" and "phase3 csrf verification" not in bundle.incomplete:
+        bundle.incomplete.append("phase3 csrf verification")
     if not safety.get("allowed", False):   # refused target: nothing verified at runtime
         for label in list(bundle.verification):
             bundle.verification[label] = "NOT VERIFIED"
@@ -268,7 +275,15 @@ def load_phase3(path: Path, bundle: Bundle) -> None:
                 continue
         endpoint, url = _endpoint_url(f.get("endpoint"))
         category = clean(f.get("category"), 40)
-        rule = f"zap/{zap_id}" if zap_id else f"{fid.rsplit('-', 1)[0]}/{re.sub(r'[^a-z0-9]+', '-', str(f.get('title', '')).lower()).strip('-')[:60]}"
+        rule = (
+            f"zap/{zap_id}"
+            if zap_id
+            else (
+                f"RT-CSRF/{fid}"
+                if fid.startswith("RT-CSRF-")
+                else f"{fid.rsplit('-', 1)[0]}/{re.sub(r'[^a-z0-9]+', '-', str(f.get('title', '')).lower()).strip('-')[:60]}"
+            )
+        )
         bundle.findings.append(UnifiedFinding(
             id=fid, layer="phase3", source="OWASP ZAP" if f.get("source") == "OWASP ZAP" else "phase3-runtime-security",
             rule_id=rule, title=clean(f.get("title"), 200),
@@ -276,7 +291,8 @@ def load_phase3(path: Path, bundle: Bundle) -> None:
             severity=_sev(f.get("severity")), confidence=clean(f.get("confidence"), 10), status=clean(f.get("status"), 20),
             blocking=f.get("blocking") is True, category=category, url=url, endpoint=endpoint,
             evidence=clean(f.get("evidence"), 300) or None, recommendation=clean(f.get("recommendation"), 600),
-            cwe=_cwe(f.get("cwe")), zap_alert_id=zap_id, correlated_zap_alerts=sorted(set(confirmed.get(fid, []))),
+            cwe=_cwe(f.get("cwe")) or ("CWE-352" if fid.startswith("RT-CSRF-") else None),
+            zap_alert_id=zap_id, correlated_zap_alerts=sorted(set(confirmed.get(fid, []))),
             extra=(_authz_extra(f) if fid.startswith("RT-AUTHZ-") else {})
             | ({"origin": f["source"]} if f.get("source") in ("imported-verification", "native-verification") else {}),
         ))

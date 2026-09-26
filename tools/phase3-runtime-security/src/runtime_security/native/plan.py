@@ -37,14 +37,22 @@ def build_plan(cfg: Config) -> NativePlan:
     rv = cfg.runtime_verification
     if not rv:
         # All areas are NOT CONFIGURED if runtime_verification is missing
-        for area in ["authentication", "session", "authorization", "idor_bola", "tenant_isolation"]:
+        for area in ["authentication", "session", "authorization", "idor_bola", "tenant_isolation", "csrf"]:
             plan.areas[area] = AreaPlan(False, "runtime_verification not configured")
+        plan.total_budget = 20
         return plan
+
+    # Dynamic total budget: 27 in fixture, 28 in local-app with CSRF; 20 / 21 without CSRF
+    has_csrf_config = bool(rv.csrf)
+    if has_csrf_config:
+        plan.total_budget = 28 if rv.mode == "local-app" else 27
+    else:
+        plan.total_budget = 21 if rv.mode == "local-app" else 20
 
     # 1. Identity setup
     if rv.mode == "local-app":
         if not rv.identity_setup:
-            for area in ["authentication", "session", "authorization", "idor_bola", "tenant_isolation"]:
+            for area in ["authentication", "session", "authorization", "idor_bola", "tenant_isolation", "csrf"]:
                 plan.areas[area] = AreaPlan(False, "missing identity_setup in local-app mode")
             plan.identity_setup_count = 0
             return plan
@@ -131,6 +139,19 @@ def build_plan(cfg: Config) -> NativePlan:
         plan.areas["tenant_isolation"] = AreaPlan(True, "", count, 4, tenant_requests)
     else:
         plan.areas["tenant_isolation"] = AreaPlan(False, "missing actors/resources in two distinct tenants")
+
+    # CSRF
+    if rv.csrf:
+        if has_user:
+            from .csrf import build_csrf_requests
+
+            csrf_requests = build_csrf_requests(cfg)
+            count = len(csrf_requests)
+            plan.areas["csrf"] = AreaPlan(True, "", count, 7, csrf_requests)
+        else:
+            plan.areas["csrf"] = AreaPlan(False, "missing user actor for csrf")
+    else:
+        plan.areas["csrf"] = AreaPlan(False, "csrf not configured")
 
     for area, p in plan.areas.items():
         if p.configured:

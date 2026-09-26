@@ -39,20 +39,28 @@ from . import status as st
 from .redaction import is_credential_key, strict_clean
 
 SCHEMA_VERSION = "1.0"
+SUPPORTED_SCHEMA_VERSIONS = frozenset({"1.0", "1.1"})
 KIND = "vibe-code-engineering/verification-results"
 MAX_BYTES = 1024 * 1024
 REQUEST_BUDGET = 20
+REQUEST_BUDGET_10 = 20
+REQUEST_BUDGET_11 = 27
 MAX_FINDINGS, MAX_EVIDENCE, MAX_LIMITATIONS = 50, 50, 20
 # area key -> (label, finding category, ID namespace)
-AREAS = {
+AREAS_10 = {
     "authentication": ("Authentication", "authentication", "AUTH"),
     "session": ("Session", "session", "SESSION"),
     "authorization": ("Authorization", "authorization", "AUTHZ"),
     "idor_bola": ("IDOR/BOLA", "idor", "IDOR"),
     "tenant_isolation": ("Tenant isolation", "tenant_isolation", "TENANT"),
 }
+AREAS_11 = {
+    **AREAS_10,
+    "csrf": ("CSRF", "csrf", "CSRF"),
+}
+AREAS = AREAS_10
 NAMESPACES = tuple(ns for _, _, ns in AREAS.values())
-IMPORTED_ID = re.compile(r"^RT-(AUTH|SESSION|AUTHZ|IDOR|TENANT)-\d{3}$")
+IMPORTED_ID = re.compile(r"^RT-(AUTH|SESSION|AUTHZ|IDOR|TENANT|CSRF)-\d{3}$")
 OBSERVATIONS = ("allowed", "denied", "not_applicable", "error")
 FINGERPRINT = re.compile(r"^[0-9a-f]{12}$")
 SOURCE = "imported-verification"
@@ -156,13 +164,13 @@ def _keys(obj: Any, where: str, allowed: set[str], required: set[str]) -> dict:
     return obj
 
 
-def _count(value: Any, where: str) -> int:
+def _count(value: Any, where: str, max_budget: int = REQUEST_BUDGET) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ImportRejected(f"{where} must be an integer")
     if value < 0:
         raise ImportRejected(f"{where} must not be negative")
-    if value > REQUEST_BUDGET:
-        raise ImportRejected(f"{where} exceeds the request budget of {REQUEST_BUDGET}")
+    if value > max_budget:
+        raise ImportRejected(f"{where} exceeds the request budget of {max_budget}")
     return value
 
 
@@ -180,7 +188,7 @@ def _finding(raw: Any, where: str, category: str, namespace: str, ctx: _Ctx) -> 
     f = _keys(raw, where, FINDING_REQUIRED | FINDING_OPTIONAL, FINDING_REQUIRED)
     fid = f["id"]
     if not isinstance(fid, str) or not IMPORTED_ID.fullmatch(fid):
-        raise ImportRejected(f"{where}.id is not a valid RT-<AUTH|SESSION|AUTHZ|IDOR|TENANT>-NNN id")
+        raise ImportRejected(f"{where}.id is not a valid RT-<AUTH|SESSION|AUTHZ|IDOR|TENANT|CSRF>-NNN id")
     if fid.split("-")[1] != namespace:
         raise ImportRejected(f"{where}.id {fid} is outside the RT-{namespace}-* namespace of this area")
     try:
@@ -218,15 +226,15 @@ def _evidence(raw: Any, where: str, ctx: _Ctx) -> dict[str, str]:
     return out
 
 
-def _area(key: str, raw: Any, ctx: _Ctx) -> ImportedArea:
+def _area(key: str, raw: Any, ctx: _Ctx, max_budget: int = REQUEST_BUDGET) -> ImportedArea:
     where = f"areas.{key}"
     a = _keys(raw, where, AREA_KEYS, AREA_REQUIRED)
-    label, category, namespace = AREAS[key]
+    label, category, namespace = AREAS_11[key] if key in AREAS_11 else AREAS[key]
     if a["status"] not in st.STATUSES:
         raise ImportRejected(f"{where}.status must be one of {', '.join(st.STATUSES)}")
     if not isinstance(a["runtime_checks_executed"], bool):
         raise ImportRejected(f"{where}.runtime_checks_executed must be true or false")
-    count = _count(a["requests_count"], f"{where}.requests_count")
+    count = _count(a["requests_count"], f"{where}.requests_count", max_budget)
     findings = [_finding(f, f"{where}.findings[{i}]", category, namespace, ctx)
                 for i, f in enumerate(_list(a.get("findings"), f"{where}.findings", MAX_FINDINGS))]
     evidence = [_evidence(e, f"{where}.evidence[{i}]", ctx) for i, e in enumerate(_list(a.get("evidence"), f"{where}.evidence", MAX_EVIDENCE))]
@@ -249,10 +257,14 @@ def validate(data: Any, base_url: str) -> ImportedVerification:
     """Validate a parsed document. Raises ImportRejected; never returns a partially accepted result."""
     _reject_credential_keys(data, "")
     doc = _keys(data, "document", TOP_KEYS, TOP_KEYS)
-    if doc["schema_version"] != SCHEMA_VERSION:
-        raise ImportRejected(f"schema_version must be {SCHEMA_VERSION!r}")
+    ver = doc["schema_version"]
+    if ver not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ImportRejected(f"schema_version must be one of {sorted(SUPPORTED_SCHEMA_VERSIONS)!r}")
     if doc["kind"] != KIND:
         raise ImportRejected(f"kind must be {KIND!r}")
+    allowed_areas = AREAS_10 if ver == "1.0" else AREAS_11
+    budget = REQUEST_BUDGET_10 if ver == "1.0" else REQUEST_BUDGET_11
+
     ctx = _Ctx()
     producer = _keys(doc["producer"], "producer", {"name", "version"}, {"name", "version"})
     producer = {"name": ctx.text(producer["name"], "producer.name", 60), "version": ctx.text(producer["version"], "producer.version", 30)}
@@ -265,13 +277,13 @@ def validate(data: Any, base_url: str) -> ImportedVerification:
     areas_raw = doc["areas"]
     if not isinstance(areas_raw, dict) or not areas_raw:
         raise ImportRejected("areas must be a non-empty object")
-    unknown = set(areas_raw) - set(AREAS)
+    unknown = set(areas_raw) - set(allowed_areas)
     if unknown:
         raise ImportRejected("unknown area(s): " + ", ".join(sorted(strict_clean(k, 40) for k in unknown)))
-    areas = {k: _area(k, areas_raw[k], ctx) for k in AREAS if k in areas_raw}
+    areas = {k: _area(k, areas_raw[k], ctx, max_budget=budget) for k in allowed_areas if k in areas_raw}
     total = sum(a.requests_count for a in areas.values())
-    if total > REQUEST_BUDGET:
-        raise ImportRejected(f"total requests_count {total} exceeds the request budget of {REQUEST_BUDGET}")
+    if total > budget:
+        raise ImportRejected(f"total requests_count {total} exceeds the request budget of {budget}")
     ids = [f.id for a in areas.values() for f in a.findings]
     if len(ids) != len(set(ids)):
         raise ImportRejected("duplicate finding id in imported result")

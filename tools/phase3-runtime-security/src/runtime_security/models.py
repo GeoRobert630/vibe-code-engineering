@@ -28,6 +28,11 @@ class Confidence(str, Enum):
 class Status(str, Enum):
     OPEN = "OPEN"
     REQUIRES_REVIEW = "REQUIRES_REVIEW"
+    PASS = "PASS"
+    FAIL = "FAIL"
+    INCOMPLETE = "INCOMPLETE"
+    NOT_CONFIGURED = "NOT CONFIGURED"
+    NOT_VERIFIED = "NOT VERIFIED"
 
 
 class Outcome(str, Enum):
@@ -57,8 +62,9 @@ ID_PREFIX = {
     # Reserved for future IDOR/BOLA and tenant-isolation results (design only); none are generated.
     "idor": "IDOR",
     "tenant_isolation": "TENANT",
+    "csrf": "CSRF",
 }
-FINDING_ID_RE = r"RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ|IDOR|TENANT)-\d{3}"
+FINDING_ID_RE = r"RT-(HEADERS|COOKIE|CORS|REDIRECT|TLS|ERROR|AUTH|SESSION|ZAP|AUTHZ|IDOR|TENANT|CSRF)-\d{3}"
 
 
 @dataclass

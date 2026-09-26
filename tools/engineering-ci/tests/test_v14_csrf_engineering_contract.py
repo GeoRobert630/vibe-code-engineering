@@ -20,10 +20,7 @@ if _TESTS_DIR not in sys.path:
 import pytest
 from test_engineering_workflow import BASH, NV, PERF_PASS, combine, job, wf  # noqa: F401
 
-pending_eng_ci = pytest.mark.xfail(
-    strict=True,
-    reason="v1.4 design contract: Engineering CI CSRF source summary pending in summarize.py",
-)
+pending_eng_ci = lambda f: f
 
 SOURCE_VALUES = {"native", "imported", "none"}
 
@@ -35,6 +32,7 @@ def test_summary_includes_csrf_in_verification_source(wf, tmp_path):
         wf,
         tmp_path,
         **NV,
+        CSRF="NOT VERIFIED",
         **job("SECURITY", "PASS", "PASS", 0),
         **job("QUALITY", "PASS", "PASS", 0),
         **PERF_PASS,
@@ -50,6 +48,7 @@ def test_csrf_individual_source_never_mixed(wf, tmp_path):
         wf,
         tmp_path,
         **NV,
+        CSRF="NOT VERIFIED",
         **job("SECURITY", "PASS", "PASS", 0),
         **job("QUALITY", "PASS", "PASS", 0),
         **PERF_PASS,
@@ -65,6 +64,7 @@ def test_human_summary_shows_csrf_status_and_source(wf, tmp_path):
         wf,
         tmp_path,
         **NV,
+        CSRF="NOT VERIFIED",
         **job("SECURITY", "PASS", "PASS", 0),
         **job("QUALITY", "PASS", "PASS", 0),
         **PERF_PASS,

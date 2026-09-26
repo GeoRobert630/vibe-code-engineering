@@ -28,10 +28,7 @@ from security_ci.gate import evaluate
 from security_ci.inputs import load_all
 from security_ci.sarif import build
 
-pending_sec_ci = pytest.mark.xfail(
-    strict=True,
-    reason="v1.4 design contract: Security CI CSRF area support pending in inputs.py / gate.py / sarif.py",
-)
+pending_sec_ci = lambda f: f
 
 FIX = Path(__file__).parent / "fixtures"
 

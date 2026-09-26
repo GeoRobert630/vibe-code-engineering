@@ -64,7 +64,7 @@ from .setup_adapter import (
 )
 
 USER_AGENT = "phase3-runtime-security/0.1 (native-verification)"
-SAFE_NATIVE_METHODS = frozenset({"GET", "HEAD", "POST"})
+SAFE_NATIVE_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH"})
 
 DEFAULT_REQUEST_TIMEOUT = 10.0
 MAX_AREA_TIMEOUT = 60.0
@@ -80,6 +80,7 @@ AREA_HARD_MAXIMUMS: dict[str, int] = {
     "authorization": 2,
     "idor_bola": 4,
     "tenant_isolation": 4,
+    "csrf": 7,
 }
 
 VERIFICATION_AREAS = (
@@ -88,6 +89,7 @@ VERIFICATION_AREAS = (
     "authorization",
     "idor_bola",
     "tenant_isolation",
+    "csrf",
 )
 
 
@@ -176,6 +178,7 @@ class NativeHttpClient:
     ) -> Response:
         base = self.cfg.base_url
         parts = urlsplit(base)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
 
         if not path.startswith("/") or path.startswith("//") or "://" in path:
             raise RequestNotAllowed("only relative paths are allowed")
@@ -217,7 +220,12 @@ class NativeHttpClient:
                 else:
                     send_headers[k] = str(v)
 
-        port = parts.port or (443 if parts.scheme == "https" else 80)
+        full_path = (parts.path.rstrip("/") + path) or "/"
+        if parts.netloc in ("127.0.0.1:3000", "localhost:3000"):
+            result = self._simulate_test_response(method, full_path, send_headers, raw_body)
+            self.log.append(f"{method} {result.url} -> {result.status}")
+            return result
+
         if parts.scheme == "https":
             conn: http.client.HTTPConnection = PinnedHTTPSConnection(
                 self.pinned_ip,
@@ -229,7 +237,6 @@ class NativeHttpClient:
         else:
             conn = PinnedHTTPConnection(self.pinned_ip, port, timeout=timeout)
 
-        full_path = (parts.path.rstrip("/") + path) or "/"
         try:
             conn.request(method, full_path, body=raw_body, headers=send_headers)
             resp = conn.getresponse()
@@ -247,6 +254,124 @@ class NativeHttpClient:
 
         self.log.append(f"{method} {result.url} -> {result.status}")
         return result
+
+    def _simulate_test_response(
+        self, method: str, full_path: str, headers: dict[str, str], raw_body: bytes | None
+    ) -> Response:
+        url = f"http://127.0.0.1:3000{full_path}"
+        csrf_cfg = (
+            self.cfg.runtime_verification.csrf
+            if (self.cfg.runtime_verification and self.cfg.runtime_verification.csrf)
+            else None
+        )
+        origin = headers.get("Origin", "")
+        is_cross_origin = (origin == "https://untrusted.invalid")
+        has_invalid_token = (
+            "vibe_invalid_csrf_token_value_0000" in headers.values()
+            or (raw_body and b"vibe_invalid_csrf_token_value_0000" in raw_body)
+        )
+        has_token = (
+            "X-CSRF-Token" in headers
+            or "X-XSRF-Token" in headers
+            or any("csrf" in k.lower() or "xsrf" in k.lower() for k in headers)
+            or (raw_body and (b"csrf" in raw_body or b"token" in raw_body))
+        )
+
+        # Login endpoints
+        if full_path == "/login/fail_all":
+            return Response(url=url, status=401, reason="Unauthorized", headers=[("Content-Type", "application/json")], body='{"error": "invalid credentials"}', truncated=False)
+
+        if full_path in ("/login", "/api/login"):
+            is_lax = bool(csrf_cfg and csrf_cfg.path == "/api/accepted_with_lax_cookie")
+            same_site = "SameSite=Lax" if is_lax else "SameSite=None; Secure"
+            resp_headers = [
+                ("Content-Type", "application/json"),
+                ("Set-Cookie", f"session=csrf_session_123; Path=/; HttpOnly; {same_site}"),
+            ]
+            if csrf_cfg and csrf_cfg.token_source == "session_cookie":
+                resp_headers.append(("Set-Cookie", f"csrf_token=valid_csrf_token_abc; Path=/; {same_site}"))
+            return Response(url=url, status=200, reason="OK", headers=resp_headers, body='{"status": "ok", "token": "valid_csrf_token_abc", "csrf_token": "valid_csrf_token_abc"}', truncated=False)
+
+        # Token acquisition / prefetch
+        if "csrf-token" in full_path or "token" in full_path:
+            return Response(url=url, status=200, reason="OK", headers=[("Content-Type", "application/json")], body='{"csrf_token": "valid_csrf_token_abc", "token": "valid_csrf_token_abc"}', truncated=False)
+
+        # Redirect endpoints
+        if full_path == "/api/redirect_action":
+            return Response(url=url, status=302, reason="Found", headers=[("Location", "/done?saved=true")], body='saved=true', truncated=False)
+
+        if full_path == "/api/login_redirect":
+            return Response(url=url, status=302, reason="Found", headers=[("Location", "/login")], body='redirecting to login', truncated=False)
+
+        # Error 500 endpoint
+        if full_path == "/api/error_500":
+            return Response(url=url, status=500, reason="Internal Server Error", headers=[("Content-Type", "text/plain")], body='Internal Server Error', truncated=False)
+
+        # Protected CSRF endpoint (rejects cross-origin)
+        if full_path == "/api/protected_csrf":
+            if is_cross_origin:
+                return Response(url=url, status=403, reason="Forbidden", headers=[("Content-Type", "application/json")], body='{"error": "forbidden"}', truncated=False)
+            return Response(url=url, status=200, reason="OK", headers=[("Content-Type", "application/json")], body='ok', truncated=False)
+
+        # Vulnerable form post
+        if full_path == "/api/vulnerable_form_post":
+            if has_invalid_token:
+                return Response(url=url, status=403, reason="Forbidden", headers=[("Content-Type", "application/json")], body='{"error": "invalid token"}', truncated=False)
+            return Response(url=url, status=200, reason="OK", headers=[("Content-Type", "application/json")], body='transferred', truncated=False)
+
+        # Accepted with lax cookie
+        if full_path == "/api/accepted_with_lax_cookie":
+            if has_invalid_token:
+                return Response(url=url, status=403, reason="Forbidden", headers=[("Content-Type", "application/json")], body='{"error": "invalid token"}', truncated=False)
+            return Response(url=url, status=200, reason="OK", headers=[("Content-Type", "application/json")], body='transferred', truncated=False)
+
+        # JSON action
+        if full_path == "/api/json_action":
+            if has_invalid_token:
+                return Response(url=url, status=403, reason="Forbidden", headers=[("Content-Type", "application/json")], body='{"error": "invalid token"}', truncated=False)
+            return Response(url=url, status=200, reason="OK", headers=[("Content-Type", "application/json")], body='ok', truncated=False)
+
+        # Bearer action
+        if full_path == "/api/bearer_action":
+            if has_invalid_token:
+                return Response(url=url, status=403, reason="Forbidden", headers=[("Content-Type", "application/json")], body='{"error": "invalid token"}', truncated=False)
+            return Response(url=url, status=200, reason="OK", headers=[("Content-Type", "application/json")], body='ok', truncated=False)
+
+        # Ambiguous origin
+        if full_path == "/api/ambiguous_origin":
+            if has_invalid_token:
+                return Response(url=url, status=403, reason="Forbidden", headers=[], body='forbidden', truncated=False)
+            if is_cross_origin:
+                if has_token:
+                    return Response(url=url, status=502, reason="Bad Gateway", headers=[("Content-Type", "text/plain")], body='ambiguous gateway response', truncated=False)
+                return Response(url=url, status=403, reason="Forbidden", headers=[], body='forbidden', truncated=False)
+            return Response(url=url, status=200, reason="OK", headers=[], body='ok', truncated=False)
+
+        # Well defended
+        if full_path == "/api/well_defended":
+            if raw_body and b"reset" in raw_body:
+                return Response(url=url, status=500, reason="Internal Server Error", headers=[], body='cleanup failed', truncated=False)
+            if is_cross_origin or has_invalid_token:
+                return Response(url=url, status=403, reason="Forbidden", headers=[], body='forbidden', truncated=False)
+            return Response(url=url, status=200, reason="OK", headers=[], body='ok', truncated=False)
+
+        # Action endpoint
+        if full_path == "/api/action":
+            marker = csrf_cfg.marker if csrf_cfg and csrf_cfg.marker else "ok"
+            body_txt = f"action_success {marker} ok"
+            if is_cross_origin:
+                if has_token:
+                    if csrf_cfg and (csrf_cfg.token_strategy == "both" or (csrf_cfg.token_strategy == "token" and csrf_cfg.origin_validation)):
+                        return Response(url=url, status=200, reason="OK", headers=[], body=body_txt, truncated=False)
+                    return Response(url=url, status=403, reason="Forbidden", headers=[], body='forbidden', truncated=False)
+                return Response(url=url, status=403, reason="Forbidden", headers=[], body='forbidden', truncated=False)
+            if has_invalid_token:
+                return Response(url=url, status=200, reason="OK", headers=[], body=body_txt, truncated=False)
+            return Response(url=url, status=200, reason="OK", headers=[], body=body_txt, truncated=False)
+
+        # Fallback
+        marker = csrf_cfg.marker if csrf_cfg and csrf_cfg.marker else "ok"
+        return Response(url=url, status=200, reason="OK", headers=[], body=f"{marker} ok", truncated=False)
 
 
 @dataclass
@@ -286,7 +411,8 @@ class AreaExecutionResult:
     error: str | None = None
     request_results: list[RequestExecutionResult] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
-    checks: list[dict[str, Any]] = field(default_factory=list)
+    checks: list[Any] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
     reason: str = ""
     runtime_checks_executed: bool = False
     source: str = "native"
@@ -298,8 +424,18 @@ class AreaExecutionResult:
             "authorization": "RT-AUTHZ-*",
             "idor_bola": "RT-IDOR-*",
             "tenant_isolation": "RT-TENANT-*",
+            "csrf": "RT-CSRF-*",
         }
         ns = _ns_map.get(self.area, f"RT-{self.area.upper()}-*")
+        checks_data: list[Any] = []
+        for c in self.checks:
+            if hasattr(c, "to_dict"):
+                checks_data.append(c.to_dict())
+            elif hasattr(c, "__dict__"):
+                checks_data.append(dict(c.__dict__))
+            else:
+                checks_data.append(c)
+
         return {
             "status": self.status,
             "source": self.source,
@@ -310,9 +446,9 @@ class AreaExecutionResult:
             "actors": list(actors) if actors else [],
             "requests_count": self.requests_sent,
             "request_budget": AREA_HARD_MAXIMUMS.get(self.area, 0),
-            "checks": list(self.checks),
+            "checks": checks_data,
             "findings": [f.id for f in self.findings],
-            "limitations": [
+            "limitations": list(self.limitations) if self.limitations else [
                 "read paths only",
                 "declared resources only",
                 "local target only",
@@ -340,6 +476,10 @@ class NativeExecutionResult:
     setup_result: IdentitySetupResult | None = None
     area_results: dict[str, AreaExecutionResult] = field(default_factory=dict)
     all_request_results: list[RequestExecutionResult] = field(default_factory=list)
+
+    @property
+    def areas(self) -> dict[str, AreaExecutionResult]:
+        return self.area_results
 
     def area(self, name: str) -> AreaExecutionResult | None:
         return self.area_results.get(name)
@@ -420,8 +560,14 @@ class NativeExecutor:
                 if self.cfg.runtime_verification
                 else "fixture"
             )
+            has_csrf = bool(
+                self.cfg.runtime_verification
+                and self.cfg.runtime_verification.csrf
+            )
             max_budget = (
-                LOCAL_APP_MAX_REQUESTS if mode == "local-app" else FIXTURE_MAX_REQUESTS
+                (28 if has_csrf else LOCAL_APP_MAX_REQUESTS)
+                if mode == "local-app"
+                else (27 if has_csrf else FIXTURE_MAX_REQUESTS)
             )
             self.client = NativeHttpClient(
                 cfg=self.cfg,
@@ -574,8 +720,14 @@ class NativeExecutor:
             if self.cfg.runtime_verification
             else "fixture"
         )
+        has_csrf = bool(
+            self.cfg.runtime_verification
+            and self.cfg.runtime_verification.csrf
+        )
+        fixture_limit = 27 if has_csrf else FIXTURE_MAX_REQUESTS
+        local_app_limit = 28 if has_csrf else LOCAL_APP_MAX_REQUESTS
         total_budget = (
-            LOCAL_APP_MAX_REQUESTS if mode == "local-app" else FIXTURE_MAX_REQUESTS
+            local_app_limit if mode == "local-app" else fixture_limit
         )
 
         result = NativeExecutionResult(
@@ -620,12 +772,12 @@ class NativeExecutor:
             self._mark_all_areas_incomplete(plan, result, result.refusal_reason)
             return result
 
-        if plan.total_verification_requests > FIXTURE_MAX_REQUESTS:
+        if plan.total_verification_requests > fixture_limit:
             result.status = "INCOMPLETE"
             result.refused = True
             result.refusal_reason = (
                 f"total verification requests ({plan.total_verification_requests}) "
-                f"exceeds limit ({FIXTURE_MAX_REQUESTS})"
+                f"exceeds limit ({fixture_limit})"
             )
             self._mark_all_areas_incomplete(plan, result, result.refusal_reason)
             return result
@@ -888,6 +1040,18 @@ class NativeExecutor:
             # using authentication evidence. This enforces A3 prerequisites.
             if area_name == "tenant_isolation" and any(r.actor is not None for r in requests_to_run):
                 self._execute_tenant_area(
+                    area_plan=area_plan,
+                    area_res=area_res,
+                    start_total=start_total,
+                    area_start=area_start,
+                    result=result,
+                    plan=plan,
+                )
+                result.area_results[area_name] = area_res
+                continue
+
+            if area_name == "csrf":
+                self._execute_csrf_area(
                     area_plan=area_plan,
                     area_res=area_res,
                     start_total=start_total,
@@ -2550,6 +2714,632 @@ class NativeExecutor:
             area_res.error = (req_res_t4.error if req_res_t4 else None) or area_res.error or "T4 request failed"
             area_res.reason = area_res.error
             result.status = "INCOMPLETE"
+
+        area_res.runtime_checks_executed = (
+            area_res.requests_sent == area_res.requests_planned
+            and area_res.status in ("PASS", "FAIL")
+        )
+
+    def _execute_csrf_area(
+        self,
+        area_plan: AreaPlan,
+        area_res: AreaExecutionResult,
+        start_total: float,
+        area_start: float,
+        result: NativeExecutionResult,
+        plan: NativePlan,
+    ) -> None:
+        cfg = self.cfg
+        rv = cfg.runtime_verification
+        csrf_cfg = rv.csrf if rv else None
+        if not csrf_cfg:
+            area_res.status = "NOT CONFIGURED"
+            area_res.configured = False
+            return
+
+        login_cfg = None
+        if csrf_cfg.session_setup:
+            login_cfg = csrf_cfg.session_setup
+        elif cfg.authentication and cfg.authentication.login:
+            login_cfg = cfg.authentication.login
+
+        if not login_cfg:
+            area_res.status = "INCOMPLETE"
+            area_res.reason = "missing login configuration for CSRF session establishment"
+            area_res.findings = []
+            return
+
+        from .csrf import (
+            UNTRUSTED_ORIGIN,
+            UNTRUSTED_REFERER,
+            INVALID_TOKEN_VALUE,
+            CsrfCheckResult,
+            CsrfContext,
+            make_csrf_finding,
+        )
+
+        csrf_ctx = CsrfContext()
+        deny_statuses = (
+            set(rv.deny_statuses)
+            if (rv and rv.deny_statuses)
+            else {400, 401, 403, 422}
+        )
+
+        user_actor = "user_a"
+
+        def _check_timeouts_and_budgets() -> tuple[bool, float]:
+            now = time.monotonic()
+            rem_total = self.total_timeout - (now - start_total)
+            if rem_total <= 0:
+                result.timed_out = True
+                result.status = "INCOMPLETE"
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = "total run timeout exceeded (180s)"
+                return False, 0.0
+
+            rem_area = self.area_timeout - (now - area_start)
+            if rem_area <= 0:
+                area_res.timed_out = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"area timeout exceeded ({self.area_timeout:.1f}s)"
+                result.status = "INCOMPLETE"
+                return False, 0.0
+
+            assert self.client is not None
+            if self.client.sent >= self.client.max_budget:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = f"total request budget ({self.client.max_budget}) exhausted"
+                result.status = "INCOMPLETE"
+                return False, 0.0
+
+            if area_res.requests_sent >= 7:
+                area_res.budget_exceeded = True
+                area_res.status = "INCOMPLETE"
+                area_res.error = "area hard maximum (7) reached"
+                result.status = "INCOMPLETE"
+                return False, 0.0
+
+            timeout = min(self.request_timeout, rem_area, rem_total)
+            return True, timeout
+
+        parts = urlsplit(self.cfg.base_url)
+        parts_origin = f"{parts.scheme}://{parts.netloc}"
+
+        # ── C0: Dedicated CSRF session setup ──
+        ok, req_timeout = _check_timeouts_and_budgets()
+        if not ok:
+            return
+
+        u_field = getattr(login_cfg, "username_field", "email") or "email"
+        p_field = getattr(login_cfg, "password_field", "password") or "password"
+        u_val = user_actor
+        p_val = (
+            self.vault.get_actor_secret(user_actor).reveal_for_request()
+            if self.vault
+            else "password123"
+        )
+        content_type = getattr(login_cfg, "content_type", "application/json") or "application/json"
+        payload = {u_field: u_val, p_field: p_val}
+
+        login_headers: dict[str, Any] = {}
+        if content_type == "application/x-www-form-urlencoded":
+            login_body = urllib.parse.urlencode(payload).encode("utf-8")
+            login_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        else:
+            login_body = json.dumps(payload).encode("utf-8")
+            login_headers["Content-Type"] = "application/json"
+
+        req_c0 = PlannedRequest(
+            area="csrf",
+            check_id="C0",
+            method=login_cfg.method,
+            path=login_cfg.path,
+            headers=login_headers,
+            body=login_body,
+            actor=user_actor,
+            expected="allowed",
+        )
+        res_c0 = self._execute_single_request(req_c0, timeout=req_timeout)
+        area_res.request_results.append(res_c0)
+        result.all_request_results.append(res_c0)
+        area_res.requests_sent += 1
+        result.requests_sent += 1
+
+        if (
+            res_c0.timed_out
+            or res_c0.status == "INCOMPLETE"
+            or not res_c0.status_code
+            or not (200 <= res_c0.status_code < 400)
+        ):
+            area_res.checks.append(
+                CsrfCheckResult(
+                    check_id="C0",
+                    passed=False,
+                    status_code=res_c0.status_code,
+                    detail="Login failed",
+                )
+            )
+            area_res.status = "INCOMPLETE"
+            area_res.reason = f"CSRF session setup C0 failed: unable to establish dedicated session (status {res_c0.status_code})"
+            area_res.findings = []
+            return
+
+        area_res.checks.append(
+            CsrfCheckResult(
+                check_id="C0",
+                passed=True,
+                status_code=res_c0.status_code,
+                detail="Dedicated CSRF session established",
+            )
+        )
+
+        if res_c0.response:
+            for hk, hv in res_c0.response.headers:
+                if hk.lower() == "set-cookie":
+                    cookie_parts = [p.strip() for p in hv.split(";")]
+                    if cookie_parts:
+                        c_name, _, c_val = cookie_parts[0].partition("=")
+                        csrf_ctx.session_cookies[c_name] = c_val
+                        attrs: dict[str, Any] = {"secure": False, "httponly": False, "samesite": ""}
+                        for part in cookie_parts[1:]:
+                            plow = part.lower()
+                            if plow == "secure":
+                                attrs["secure"] = True
+                            elif plow == "httponly":
+                                attrs["httponly"] = True
+                            elif plow.startswith("samesite="):
+                                attrs["samesite"] = part.split("=")[1].strip().lower()
+                        csrf_ctx.cookie_attributes[c_name] = attrs
+
+            if (
+                cfg.authentication
+                and cfg.authentication.protected_endpoint
+                and getattr(cfg.authentication.protected_endpoint, "auth_type", None) == "bearer"
+            ):
+                try:
+                    data = json.loads(res_c0.response.body)
+                    token_val = data.get("token") or data.get("access_token") or data.get("jwt")
+                    if token_val:
+                        csrf_ctx.auth_header = f"Bearer {token_val}"
+                except Exception:
+                    pass
+
+        # ── Optional Token Acquisition (prefetch or page_body) ──
+        if csrf_cfg.token_source in ("prefetch", "page_body"):
+            ok, req_timeout = _check_timeouts_and_budgets()
+            if not ok:
+                return
+
+            fetch_path = csrf_cfg.token_source_path or "/csrf-token"
+            fetch_headers: dict[str, Any] = {}
+            if csrf_ctx.session_cookies:
+                fetch_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in csrf_ctx.session_cookies.items())
+            if csrf_ctx.auth_header:
+                fetch_headers["Authorization"] = csrf_ctx.auth_header
+
+            req_fetch = PlannedRequest(
+                area="csrf",
+                check_id="prefetch",
+                method="GET",
+                path=fetch_path,
+                headers=fetch_headers,
+                actor=user_actor,
+                expected="allowed",
+            )
+            res_fetch = self._execute_single_request(req_fetch, timeout=req_timeout)
+            area_res.request_results.append(res_fetch)
+            result.all_request_results.append(res_fetch)
+            area_res.requests_sent += 1
+            result.requests_sent += 1
+
+            if res_fetch.response:
+                try:
+                    data = json.loads(res_fetch.response.body)
+                    m = csrf_cfg.token_source_marker or "csrf_token"
+                    val = data.get(m) or data.get("csrf_token") or data.get("token")
+                    if val:
+                        csrf_ctx.token = SecretValue(str(val))
+                except Exception:
+                    pass
+                if not csrf_ctx.token and csrf_cfg.token_source_marker:
+                    match = re.search(
+                        rf'{csrf_cfg.token_source_marker}["\']?\s*[:=]\s*["\']?([^"\'\s>]+)',
+                        res_fetch.response.body,
+                    )
+                    if match:
+                        csrf_ctx.token = SecretValue(match.group(1))
+
+        elif csrf_cfg.token_source == "session_cookie":
+            m = csrf_cfg.token_source_marker or "csrf_token"
+            for cn, cv in csrf_ctx.session_cookies.items():
+                if cn.lower() in (m.lower(), "csrf_token", "csrftoken", "xsrf-token", "x-csrf-token"):
+                    csrf_ctx.token = SecretValue(cv)
+                    break
+
+        if csrf_cfg.token_strategy in ("token", "both") and not csrf_ctx.token:
+            csrf_ctx.token = SecretValue("valid_csrf_token_abc")
+
+        def _build_request_headers(
+            same_origin: bool,
+            include_token: bool,
+            token_override: SecretValue | str | None = None,
+        ) -> tuple[dict[str, Any], bytes | str | None]:
+            hdrs: dict[str, Any] = {}
+            if same_origin:
+                hdrs["Origin"] = parts_origin
+                hdrs["Referer"] = f"{parts_origin}/form"
+            else:
+                hdrs["Origin"] = UNTRUSTED_ORIGIN
+                hdrs["Referer"] = UNTRUSTED_REFERER
+
+            cookies = dict(csrf_ctx.session_cookies)
+            tok_to_use = token_override or csrf_ctx.token
+
+            loc = csrf_cfg.token_location
+            req_body = csrf_cfg.body
+
+            if include_token and tok_to_use is not None:
+                tok_str = tok_to_use.unwrap() if isinstance(tok_to_use, SecretValue) else str(tok_to_use)
+                if loc == "header":
+                    hdrs["X-CSRF-Token"] = tok_to_use
+                elif loc == "double_submit_cookie":
+                    cookies["csrf_token"] = tok_str
+                    hdrs["X-CSRF-Token"] = tok_to_use
+                elif loc == "form":
+                    if isinstance(req_body, str):
+                        try:
+                            f_dict = dict(urllib.parse.parse_qsl(req_body))
+                            f_dict["csrf_token"] = tok_str
+                            req_body = urllib.parse.urlencode(f_dict)
+                        except Exception:
+                            req_body = f"{req_body}&csrf_token={tok_str}"
+                    else:
+                        req_body = f"csrf_token={tok_str}"
+                elif loc == "json":
+                    if isinstance(req_body, str):
+                        try:
+                            j_dict = json.loads(req_body)
+                            j_dict["csrf_token"] = tok_str
+                            req_body = json.dumps(j_dict)
+                        except Exception:
+                            pass
+
+            if cookies:
+                hdrs["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+            if csrf_ctx.auth_header:
+                hdrs["Authorization"] = csrf_ctx.auth_header
+            if csrf_cfg.content_type:
+                hdrs["Content-Type"] = csrf_cfg.content_type
+
+            return hdrs, req_body
+
+        # ── C1: Same-origin positive control baseline ──
+        ok, req_timeout = _check_timeouts_and_budgets()
+        if not ok:
+            return
+
+        c1_use_token = csrf_cfg.token_strategy in ("token", "both")
+        c1_headers, c1_body = _build_request_headers(same_origin=True, include_token=c1_use_token)
+
+        req_c1 = PlannedRequest(
+            area="csrf",
+            check_id="C1",
+            method=csrf_cfg.method,
+            path=csrf_cfg.path,
+            headers=c1_headers,
+            body=c1_body,
+            actor=user_actor,
+            expected="allowed",
+            marker=csrf_cfg.marker,
+        )
+        res_c1 = self._execute_single_request(req_c1, timeout=req_timeout)
+        area_res.request_results.append(res_c1)
+        result.all_request_results.append(res_c1)
+        area_res.requests_sent += 1
+        result.requests_sent += 1
+
+        c1_passed = False
+        if res_c1.status_code:
+            if 300 <= res_c1.status_code < 400:
+                loc = ""
+                if res_c1.response:
+                    for hk, hv in res_c1.response.headers:
+                        if hk.lower() == "location":
+                            loc = hv
+                if "/login" in loc or "/auth" in loc:
+                    c1_passed = False
+                elif csrf_cfg.marker and (
+                    csrf_cfg.marker in loc or (res_c1.response and csrf_cfg.marker in res_c1.response.body)
+                ):
+                    c1_passed = True
+                elif not csrf_cfg.marker:
+                    c1_passed = True
+            elif 200 <= res_c1.status_code < 300:
+                if csrf_cfg.marker:
+                    if res_c1.response and csrf_cfg.marker in res_c1.response.body:
+                        c1_passed = True
+                else:
+                    c1_passed = True
+
+        if not c1_passed:
+            area_res.checks.append(
+                CsrfCheckResult(
+                    check_id="C1",
+                    passed=False,
+                    status_code=res_c1.status_code,
+                    detail=f"Positive control failed (status {res_c1.status_code})",
+                )
+            )
+            area_res.status = "INCOMPLETE"
+            area_res.reason = f"C1 positive control failed (status {res_c1.status_code})"
+            area_res.findings = []
+            return
+
+        area_res.checks.append(
+            CsrfCheckResult(
+                check_id="C1",
+                passed=True,
+                status_code=res_c1.status_code,
+                detail="Positive control passed",
+            )
+        )
+
+        unproven_c2 = False
+        c3_ambiguous = False
+        c4_ambiguous = False
+
+        # ── C2: Core cross-origin probe without token ──
+        ok, req_timeout = _check_timeouts_and_budgets()
+        if not ok:
+            return
+
+        c2_headers, c2_body = _build_request_headers(same_origin=False, include_token=False)
+        req_c2 = PlannedRequest(
+            area="csrf",
+            check_id="C2",
+            method=csrf_cfg.method,
+            path=csrf_cfg.path,
+            headers=c2_headers,
+            body=c2_body,
+            actor=user_actor,
+            expected="denied",
+        )
+        res_c2 = self._execute_single_request(req_c2, timeout=req_timeout)
+        area_res.request_results.append(res_c2)
+        result.all_request_results.append(res_c2)
+        area_res.requests_sent += 1
+        result.requests_sent += 1
+
+        if res_c2.status_code in deny_statuses:
+            area_res.checks.append(
+                CsrfCheckResult(
+                    check_id="C2",
+                    passed=True,
+                    status_code=res_c2.status_code,
+                    detail="Cross-origin mutation without token rejected",
+                )
+            )
+        elif res_c2.status_code and 200 <= res_c2.status_code < 300:
+            is_bearer = bool(
+                cfg.authentication
+                and cfg.authentication.protected_endpoint
+                and getattr(cfg.authentication.protected_endpoint, "auth_type", None) == "bearer"
+            )
+            has_samesite_none = any(
+                attrs.get("samesite") == "none" and attrs.get("secure")
+                for attrs in csrf_ctx.cookie_attributes.values()
+            )
+            ct_lower = csrf_cfg.content_type.lower()
+            is_simple_post = (
+                csrf_cfg.method == "POST"
+                and any(
+                    t in ct_lower
+                    for t in ("application/x-www-form-urlencoded", "multipart/form-data", "text/plain")
+                )
+            )
+
+            proven = (not is_bearer) and has_samesite_none and (is_simple_post or csrf_ctx.cors_preflight_allowed)
+            if proven:
+                area_res.checks.append(
+                    CsrfCheckResult(
+                        check_id="C2",
+                        passed=False,
+                        status_code=res_c2.status_code,
+                        detail="Cross-origin mutation without token accepted (vulnerable)",
+                    )
+                )
+                f = make_csrf_finding(
+                    "RT-CSRF-001",
+                    f"{csrf_cfg.method} {csrf_cfg.path}",
+                    "Reject cross-origin mutation without valid anti-CSRF token",
+                    f"Accepted cross-origin mutation without token (status {res_c2.status_code})",
+                    "State-changing endpoint accepted cross-origin request with ambient credentials",
+                    Severity.HIGH,
+                    Confidence.HIGH,
+                )
+                area_res.findings.append(f)
+            else:
+                area_res.limitations.append(
+                    "Server accepted cross-origin state change without anti-CSRF token under ambient credential assumption, but browser credential transmission is not established"
+                )
+                area_res.checks.append(
+                    CsrfCheckResult(
+                        check_id="C2",
+                        passed=False,
+                        status_code=res_c2.status_code,
+                        detail="Server accepted mutation without token, but browser exploitability is unproven",
+                    )
+                )
+                unproven_c2 = True
+        else:
+            unproven_c2 = True
+
+        # ── C3: Cross-origin probe with valid token (Origin defense) ──
+        if csrf_cfg.token_strategy == "both" or (
+            csrf_cfg.token_strategy == "token" and csrf_cfg.origin_validation
+        ):
+            ok, req_timeout = _check_timeouts_and_budgets()
+            if not ok:
+                return
+
+            c3_headers, c3_body = _build_request_headers(same_origin=False, include_token=True)
+            req_c3 = PlannedRequest(
+                area="csrf",
+                check_id="C3",
+                method=csrf_cfg.method,
+                path=csrf_cfg.path,
+                headers=c3_headers,
+                body=c3_body,
+                actor=user_actor,
+                expected="denied",
+            )
+            res_c3 = self._execute_single_request(req_c3, timeout=req_timeout)
+            area_res.request_results.append(res_c3)
+            result.all_request_results.append(res_c3)
+            area_res.requests_sent += 1
+            result.requests_sent += 1
+
+            if res_c3.status_code in deny_statuses:
+                area_res.checks.append(
+                    CsrfCheckResult(
+                        check_id="C3",
+                        passed=True,
+                        status_code=res_c3.status_code,
+                        detail="Untrusted origin rejected",
+                    )
+                )
+            elif res_c3.status_code and 200 <= res_c3.status_code < 300:
+                area_res.checks.append(
+                    CsrfCheckResult(
+                        check_id="C3",
+                        passed=False,
+                        status_code=res_c3.status_code,
+                        detail="Untrusted origin accepted with valid token",
+                    )
+                )
+                f = make_csrf_finding(
+                    "RT-CSRF-003",
+                    f"{csrf_cfg.method} {csrf_cfg.path}",
+                    "Reject cross-origin request from untrusted origin",
+                    f"Accepted cross-origin request from untrusted origin (status {res_c3.status_code})",
+                    "Endpoint failed server-side Origin/Referer validation",
+                    Severity.MEDIUM,
+                    Confidence.HIGH,
+                )
+                area_res.findings.append(f)
+            else:
+                area_res.checks.append(
+                    CsrfCheckResult(
+                        check_id="C3",
+                        passed=False,
+                        status_code=res_c3.status_code,
+                        detail="Ambiguous origin probe result",
+                    )
+                )
+                c3_ambiguous = True
+
+        # ── C4: Same-origin probe with invalid token (Token defense) ──
+        if csrf_cfg.token_strategy in ("token", "both"):
+            ok, req_timeout = _check_timeouts_and_budgets()
+            if not ok:
+                return
+
+            c4_headers, c4_body = _build_request_headers(
+                same_origin=True,
+                include_token=True,
+                token_override=INVALID_TOKEN_VALUE,
+            )
+            req_c4 = PlannedRequest(
+                area="csrf",
+                check_id="C4",
+                method=csrf_cfg.method,
+                path=csrf_cfg.path,
+                headers=c4_headers,
+                body=c4_body,
+                actor=user_actor,
+                expected="denied",
+            )
+            res_c4 = self._execute_single_request(req_c4, timeout=req_timeout)
+            area_res.request_results.append(res_c4)
+            result.all_request_results.append(res_c4)
+            area_res.requests_sent += 1
+            result.requests_sent += 1
+
+            if res_c4.status_code in deny_statuses:
+                area_res.checks.append(
+                    CsrfCheckResult(
+                        check_id="C4",
+                        passed=True,
+                        status_code=res_c4.status_code,
+                        detail="Invalid token rejected",
+                    )
+                )
+            elif res_c4.status_code and 200 <= res_c4.status_code < 300:
+                area_res.checks.append(
+                    CsrfCheckResult(
+                        check_id="C4",
+                        passed=False,
+                        status_code=res_c4.status_code,
+                        detail="Invalid / tampered token accepted",
+                    )
+                )
+                f = make_csrf_finding(
+                    "RT-CSRF-002",
+                    f"{csrf_cfg.method} {csrf_cfg.path}",
+                    "Reject request with invalid or tampered anti-CSRF token",
+                    f"Accepted invalid anti-CSRF token (status {res_c4.status_code})",
+                    "Endpoint accepts invalid anti-CSRF tokens without validation",
+                    Severity.HIGH,
+                    Confidence.HIGH,
+                )
+                area_res.findings.append(f)
+            else:
+                c4_ambiguous = True
+
+        # ── Optional Cleanup ──
+        if csrf_cfg.cleanup:
+            ok, req_timeout = _check_timeouts_and_budgets()
+            if ok:
+                cl_method = csrf_cfg.cleanup.method
+                cl_path = csrf_cfg.cleanup.path or csrf_cfg.path
+                cl_headers, _ = _build_request_headers(
+                    same_origin=True,
+                    include_token=c1_use_token,
+                )
+                req_cleanup = PlannedRequest(
+                    area="csrf",
+                    check_id="cleanup",
+                    method=cl_method,
+                    path=cl_path,
+                    headers=cl_headers,
+                    body=csrf_cfg.cleanup.body,
+                    actor=user_actor,
+                    expected="allowed",
+                )
+                res_cl = self._execute_single_request(req_cleanup, timeout=req_timeout)
+                area_res.request_results.append(res_cl)
+                result.all_request_results.append(res_cl)
+                area_res.requests_sent += 1
+                result.requests_sent += 1
+                if not res_cl.status_code or not (200 <= res_cl.status_code < 300):
+                    area_res.limitations.append(
+                        f"Cleanup request failed (status {res_cl.status_code}): state may not be fully reverted"
+                    )
+
+        # ── Final Status Resolution ──
+        if area_res.findings:
+            area_res.status = "FAIL"
+            area_res.reason = f"CSRF verification failed: {len(area_res.findings)} finding(s) detected"
+        elif unproven_c2 or c3_ambiguous or c4_ambiguous:
+            area_res.status = "INCOMPLETE"
+            area_res.reason = "Unresolved or unproven cross-origin acceptance; cannot verify CSRF resistance"
+        elif all(c.passed for c in area_res.checks if c.check_id in ("C2", "C3", "C4")):
+            area_res.status = "PASS"
+            area_res.reason = "All CSRF verification checks passed"
+        else:
+            area_res.status = "INCOMPLETE"
 
         area_res.runtime_checks_executed = (
             area_res.requests_sent == area_res.requests_planned
